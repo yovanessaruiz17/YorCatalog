@@ -1,0 +1,8 @@
+{
+  "name": "YorCatalog",
+  "description": "PWA comercial para gestión de inventario, catálogos digitales interactivos y pedidos por WhatsApp.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

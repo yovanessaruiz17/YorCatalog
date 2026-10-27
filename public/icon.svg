@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <rect width="512" height="512" rx="112" fill="#0f172a"/>
+  <!-- Editorial Catalog Geometry -->
+  <path d="M120 140C120 128.954 128.954 120 140 120H372C383.046 120 392 128.954 392 140V372C392 383.046 383.046 392 372 392H140C128.954 392 120 383.046 120 372V140Z" fill="#1e293b"/>
+  <!-- Left Folio Page -->
+  <path d="M140 140H248V372H140C128.954 372 120 363.046 120 352V160C120 148.954 128.954 140 140 140Z" fill="#0f766e"/>
+  <!-- Right Folio Page -->
+  <path d="M264 140H372C383.046 140 392 148.954 392 160V352C392 363.046 383.046 372 372 372H264V140Z" fill="#0d9488"/>
+  <!-- Subtle Spine Center -->
+  <rect x="250" y="140" width="12" height="232" rx="3" fill="#14b8a6"/>
+  <!-- Editorial Y monogram ligature across spread -->
+  <path d="M190 200L256 280L322 200H350L268 296V336H244V296L162 200H190Z" fill="#ffffff"/>
+  <!-- Accent spark dot -->
+  <circle cx="340" cy="180" r="14" fill="#38bdf8"/>
+</svg>
