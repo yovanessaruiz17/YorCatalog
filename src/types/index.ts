@@ -100,6 +100,12 @@ export interface CatalogPublishedSnapshot {
 
 export interface Catalog {
   id: string;
+  workspaceId?: string;
+  ownerId?: string;
+  businessName?: string;
+  whatsappNumber?: string;
+  currency?: SupportedCurrency;
+  language?: SupportedLanguage;
   internalName: string;
   title: string;
   subtitle?: string;
@@ -163,8 +169,11 @@ export interface OrderItem {
 
 export interface Order {
   id: string;
+  workspaceId?: string;
+  ownerId?: string;
   orderNumber: string;
   catalogId?: string;
+  catalogShareToken?: string;
   catalogTitle?: string;
   catalogVersion?: number;
   customerName: string;
@@ -310,6 +319,10 @@ export interface CandidateImage {
   matchedProductId?: string;
   matchStatus: ImageMatchStatus;
   ambiguousMatches?: string[];
+  fileBlob?: Blob;
+  remoteUrl?: string;
+  storagePath?: string;
+  isLocalFallback?: boolean;
 }
 
 // --- Service Contracts ---

@@ -29,7 +29,10 @@ import {
   BookOpen,
 } from 'lucide-react';
 import { useSettings } from '../context/SettingsContext';
-import { mockDataService } from '../services/mockDataService';
+import { dataService } from '../services/dataService';
+import { formatCloudErrorForUser } from '../services/firebaseClient';
+import { QueryStateAlert, QueryErrorState } from '../components/common/QueryStateAlert';
+import { useAuth } from '../context/AuthContext';
 import { downloadCatalogPdfFile } from '../services/pdfGenerator';
 import QRCode from 'qrcode';
 import { buildPublicCatalogUrl } from '../utils/url';
@@ -37,8 +40,12 @@ import { Catalog, Product } from '../types';
 
 export const MagazinePage: React.FC = () => {
   const { t, formatPrice, settings } = useSettings();
+  const { currentWorkspace } = useAuth();
   const [publishedCatalogs, setPublishedCatalogs] = useState<Catalog[]>([]);
   const [activeCatalog, setActiveCatalog] = useState<Catalog | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [queryError, setQueryError] = useState<QueryErrorState | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [copiedToken, setCopiedToken] = useState<string | null>(null);
   const [currentSlideIndex, setCurrentSlideIndex] = useState(0);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
@@ -58,18 +65,37 @@ export const MagazinePage: React.FC = () => {
   }, [activeCatalog]);
 
   // Cargar catálogos publicados
-  const loadCatalogs = () => {
-    mockDataService.getPublishedCatalogs().then((cats) => {
+  const loadCatalogs = async () => {
+    const wsId = currentWorkspace?.id;
+    setPublishedCatalogs([]);
+    setActiveCatalog(null);
+    setCurrentSlideIndex(0);
+    setUnpublishTarget(null);
+    setQueryError(null);
+    setActionError(null);
+
+    if (!wsId) {
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const cats = await dataService.getPublishedCatalogs(wsId);
       setPublishedCatalogs(cats);
-      if (cats.length > 0 && (!activeCatalog || !cats.some((c) => c.id === activeCatalog.id))) {
+      if (cats.length > 0) {
         setActiveCatalog(cats[0]);
       }
-    });
+    } catch (err) {
+      setQueryError(formatCloudErrorForUser(err, 'No se pudieron cargar las revistas publicadas.'));
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
-    loadCatalogs();
-  }, []);
+    void loadCatalogs();
+  }, [currentWorkspace?.id]);
 
   // Productos del catálogo activo
   const activeProducts: Product[] = React.useMemo(() => {
@@ -97,12 +123,18 @@ export const MagazinePage: React.FC = () => {
 
   const confirmUnpublish = async () => {
     if (!unpublishTarget) return;
-    await mockDataService.unpublishCatalog(unpublishTarget.id);
-    setUnpublishTarget(null);
-    loadCatalogs();
+    setActionError(null);
+    try {
+      await dataService.unpublishCatalog(unpublishTarget.id, currentWorkspace?.id);
+      setUnpublishTarget(null);
+      await loadCatalogs();
+    } catch (err) {
+      setActionError(formatCloudErrorForUser(err, 'No se pudo despublicar el catálogo.').message);
+    }
   };
 
   const handleDownloadPdf = async (cat: Catalog) => {
+    setActionError(null);
     setIsExportingPdf(true);
     setPdfProgress(10);
     try {
@@ -113,8 +145,7 @@ export const MagazinePage: React.FC = () => {
         (p) => setPdfProgress(p)
       );
     } catch (e) {
-      console.error(e);
-      alert('Error generando el documento PDF.');
+      setActionError(formatCloudErrorForUser(e, 'Error generando el documento PDF.').message);
     } finally {
       setIsExportingPdf(false);
       setPdfProgress(0);
@@ -170,8 +201,26 @@ export const MagazinePage: React.FC = () => {
         </div>
       </div>
 
-      {/* Selector de Catálogos Publicados */}
-      {publishedCatalogs.length === 0 ? (
+      {/* Selector de Catálogos Publicados o Estado Diferenciado */}
+      {actionError && (
+        <div className="p-4 bg-rose-50 dark:bg-rose-950/70 border border-rose-200 dark:border-rose-900 rounded-2xl flex items-center justify-between gap-3 text-xs text-rose-800 dark:text-rose-200">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>{actionError}</span>
+          </div>
+          <button onClick={() => setActionError(null)} className="font-bold">
+            Cerrar
+          </button>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="flex items-center justify-center py-16">
+          <div className="animate-spin rounded-full h-8 w-8 border-2 border-slate-900 dark:border-emerald-500 border-t-transparent" />
+        </div>
+      ) : queryError ? (
+        <QueryStateAlert error={queryError} onRetry={() => void loadCatalogs()} />
+      ) : publishedCatalogs.length === 0 ? (
         <div className="p-12 text-center bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 space-y-4">
           <BookOpen className="w-12 h-12 mx-auto text-slate-400 stroke-1" />
           <h3 className="font-bold text-base text-slate-900 dark:text-white">

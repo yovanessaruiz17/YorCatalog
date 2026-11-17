@@ -34,12 +34,19 @@ import {
   MessageSquare,
 } from 'lucide-react';
 import { useSettings } from '../context/SettingsContext';
-import { mockDataService } from '../services/mockDataService';
+import { dataService } from '../services/dataService';
+import { formatCloudErrorForUser } from '../services/firebaseClient';
+import { QueryStateAlert, QueryErrorState } from '../components/common/QueryStateAlert';
+import { useAuth } from '../context/AuthContext';
 import { Order, OrderStatus } from '../types';
 
 export const OrdersPage: React.FC = () => {
   const { t, formatPrice, formatDate, settings } = useSettings();
+  const { currentWorkspace } = useAuth();
   const [orders, setOrders] = useState<Order[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [queryError, setQueryError] = useState<QueryErrorState | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [catalogFilter, setCatalogFilter] = useState<string>('all');
@@ -47,30 +54,61 @@ export const OrdersPage: React.FC = () => {
   const [orderToDelete, setOrderToDelete] = useState<string | null>(null);
   const [copiedSummary, setCopiedSummary] = useState(false);
 
-  const loadOrders = () => {
-    mockDataService.getOrders().then(setOrders);
+  const loadOrders = async () => {
+    const wsId = currentWorkspace?.id;
+    setOrders([]);
+    setSelectedOrder(null);
+    setOrderToDelete(null);
+    setQueryError(null);
+    setActionError(null);
+
+    if (!wsId) {
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const data = await dataService.getOrders(wsId);
+      setOrders(data);
+    } catch (err) {
+      setQueryError(formatCloudErrorForUser(err, 'No se pudieron cargar los pedidos del workspace.'));
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
-    loadOrders();
-  }, []);
+    void loadOrders();
+  }, [currentWorkspace?.id]);
 
   const handleUpdateStatus = async (orderId: string, newStatus: OrderStatus) => {
-    await mockDataService.updateOrderStatus(orderId, newStatus);
-    loadOrders();
-    if (selectedOrder && selectedOrder.id === orderId) {
-      setSelectedOrder((prev) => (prev ? { ...prev, status: newStatus } : null));
+    setActionError(null);
+    try {
+      await dataService.updateOrderStatus(orderId, newStatus, currentWorkspace?.id);
+      await loadOrders();
+      if (selectedOrder && selectedOrder.id === orderId) {
+        setSelectedOrder((prev) => (prev ? { ...prev, status: newStatus } : null));
+      }
+    } catch (err) {
+      setActionError(formatCloudErrorForUser(err, 'No se pudo actualizar el estado del pedido.').message);
     }
   };
 
   const confirmDeleteOrder = async () => {
     if (!orderToDelete) return;
-    await mockDataService.deleteOrder(orderToDelete);
-    loadOrders();
-    if (selectedOrder?.id === orderToDelete) {
-      setSelectedOrder(null);
+    setActionError(null);
+    try {
+      await dataService.deleteOrder(orderToDelete, currentWorkspace?.id);
+      const deletedId = orderToDelete;
+      setOrderToDelete(null);
+      await loadOrders();
+      if (selectedOrder?.id === deletedId) {
+        setSelectedOrder(null);
+      }
+    } catch (err) {
+      setActionError(formatCloudErrorForUser(err, 'No se pudo eliminar el pedido del registro.').message);
     }
-    setOrderToDelete(null);
   };
 
   // Obtener lista única de catálogos representados en las órdenes
@@ -316,8 +354,29 @@ export const OrdersPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Lista de Pedidos */}
-      {filteredOrders.length === 0 ? (
+      {/* Lista de Pedidos o Estado Diferenciado */}
+      {actionError && (
+        <div className="p-4 bg-rose-50 dark:bg-rose-950/70 border border-rose-200 dark:border-rose-900 rounded-2xl flex items-center justify-between gap-3 text-xs text-rose-800 dark:text-rose-200">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>{actionError}</span>
+          </div>
+          <button
+            onClick={() => setActionError(null)}
+            className="text-rose-500 hover:text-rose-700 font-bold"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="flex items-center justify-center py-16">
+          <div className="animate-spin rounded-full h-8 w-8 border-2 border-slate-900 dark:border-emerald-500 border-t-transparent" />
+        </div>
+      ) : queryError ? (
+        <QueryStateAlert error={queryError} onRetry={() => void loadOrders()} />
+      ) : filteredOrders.length === 0 ? (
         <div className="p-12 text-center bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 space-y-3">
           <ShoppingBag className="w-10 h-10 mx-auto text-slate-400 stroke-1" />
           <h3 className="font-bold text-sm text-slate-900 dark:text-white">

@@ -45,7 +45,10 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { useSettings } from '../context/SettingsContext';
-import { mockDataService } from '../services/mockDataService';
+import { dataService } from '../services/dataService';
+import { formatCloudErrorForUser } from '../services/firebaseClient';
+import { QueryStateAlert, QueryErrorState } from '../components/common/QueryStateAlert';
+import { useAuth } from '../context/AuthContext';
 import { CATALOG_TEMPLATES, DEFAULT_VISUAL_SETTINGS } from '../services/templateCatalog';
 import { generateCatalogPDF, PDFGenerationProgress } from '../services/pdfGenerator';
 import QRCode from 'qrcode';
@@ -62,10 +65,13 @@ import {
 
 export const CatalogsPage: React.FC = () => {
   const { t, formatDate, formatPrice, settings } = useSettings();
+  const { currentWorkspace } = useAuth();
   const [catalogs, setCatalogs] = useState<Catalog[]>([]);
   const [inventoryProducts, setInventoryProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
+  const [queryError, setQueryError] = useState<QueryErrorState | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   // Active Editor View (null means list view, catalog object means editor view)
   const [activeCatalog, setActiveCatalog] = useState<Catalog | null>(null);
@@ -105,20 +111,38 @@ export const CatalogsPage: React.FC = () => {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    loadData();
-  }, []);
+    setActiveCatalog(null);
+    setShareModalCatalog(null);
+    setUnpublishCatalogTarget(null);
+    setDeleteConfirmId(null);
+    void loadData();
+  }, [currentWorkspace?.id]);
 
   const loadData = async () => {
+    const wsId = currentWorkspace?.id;
+    setCatalogs([]);
+    setInventoryProducts([]);
+    setCategories([]);
+    setQueryError(null);
+    setActionError(null);
+
+    if (!wsId) {
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     try {
       const [cats, prods, catList] = await Promise.all([
-        mockDataService.getCatalogs(),
-        mockDataService.getAll(),
-        mockDataService.getCategories(),
+        dataService.getCatalogs(wsId),
+        dataService.getAll(wsId),
+        dataService.getCategories(wsId),
       ]);
       setCatalogs(cats);
       setInventoryProducts(prods);
       setCategories(catList);
+    } catch (err) {
+      setQueryError(formatCloudErrorForUser(err, 'No se pudieron cargar los catálogos del workspace.'));
     } finally {
       setLoading(false);
     }
@@ -131,7 +155,8 @@ export const CatalogsPage: React.FC = () => {
 
   // --- CRUD ACTIONS ---
 
-  const handleCreateNewCatalog = (initialTemplate: CatalogTemplateId = 'editorial') => {
+  const handleCreateNewCatalog = async (initialTemplate: CatalogTemplateId = 'editorial') => {
+    setActionError(null);
     const templateDef = CATALOG_TEMPLATES.find((t) => t.id === initialTemplate) || CATALOG_TEMPLATES[0];
     const initialVisualSettings: CatalogVisualSettings = {
       ...DEFAULT_VISUAL_SETTINGS,
@@ -163,36 +188,60 @@ export const CatalogsPage: React.FC = () => {
       products: initialItems,
     };
 
-    mockDataService.createCatalog(newCat).then((created) => {
+    try {
+      const created = await dataService.createCatalog(newCat, currentWorkspace?.id);
+      await loadData();
       setActiveCatalog(created);
       setEditorTab('products');
       setPreviewPage(1);
-      loadData();
       showToast('Nuevo catálogo creado en borrador.');
-    });
+    } catch (err) {
+      setActionError(formatCloudErrorForUser(err, 'No se pudo crear el catálogo en Firestore.').message);
+    }
   };
 
   const handleDuplicateCatalog = async (id: string) => {
-    const dup = await mockDataService.duplicateCatalog(id);
-    await loadData();
-    showToast(`Catálogo duplicado como "${dup.internalName}".`);
+    setActionError(null);
+    try {
+      const dup = await dataService.duplicateCatalog(id, currentWorkspace?.id);
+      await loadData();
+      showToast(`Catálogo duplicado como "${dup.internalName}".`);
+    } catch (err) {
+      setActionError(formatCloudErrorForUser(err, 'No se pudo duplicar el catálogo.').message);
+    }
   };
 
   const handleDeleteCatalog = async (id: string) => {
-    await mockDataService.deleteCatalog(id);
-    setDeleteConfirmId(null);
-    if (activeCatalog?.id === id) setActiveCatalog(null);
-    await loadData();
-    showToast('Catálogo eliminado.');
+    setActionError(null);
+    try {
+      await dataService.deleteCatalog(id, currentWorkspace?.id);
+      setDeleteConfirmId(null);
+      if (activeCatalog?.id === id) setActiveCatalog(null);
+      await loadData();
+      showToast('Catálogo eliminado.');
+    } catch (err) {
+      setActionError(formatCloudErrorForUser(err, 'No se pudo eliminar el catálogo.').message);
+    }
   };
 
   const handlePublishCatalog = async (id: string) => {
-    const published = await mockDataService.publishCatalog(id);
-    if (activeCatalog?.id === id) {
-      setActiveCatalog(published);
+    setActionError(null);
+    try {
+      const targetCatalog =
+        activeCatalog?.id === id ? activeCatalog : catalogs.find((c) => c.id === id);
+      const published = await dataService.publishCatalog(
+        id,
+        targetCatalog,
+        currentWorkspace?.id
+      );
+      await loadData();
+      if (activeCatalog?.id === id) {
+        setActiveCatalog(published);
+      }
+      showToast(`¡Catálogo publicado con éxito como versión v${published.version}.0! La revista virtual pública se encuentra activa.`);
+    } catch (err) {
+      setActionError(formatCloudErrorForUser(err, 'No se pudo publicar el catálogo.').message);
     }
-    await loadData();
-    showToast(`¡Catálogo publicado con éxito como versión v${published.version}.0! La revista virtual pública se encuentra activa.`);
   };
 
   const handleUnpublishCatalog = (id: string) => {
@@ -204,14 +253,20 @@ export const CatalogsPage: React.FC = () => {
 
   const confirmUnpublish = async () => {
     if (!unpublishCatalogTarget) return;
+    setActionError(null);
     const id = unpublishCatalogTarget.id;
-    const unpublished = await mockDataService.unpublishCatalog(id);
-    if (activeCatalog?.id === id) {
-      setActiveCatalog(unpublished);
+    try {
+      await dataService.unpublishCatalog(id, currentWorkspace?.id);
+      setUnpublishCatalogTarget(null);
+      await loadData();
+      if (activeCatalog?.id === id) {
+        const updatedCat = await dataService.getCatalogById(id, currentWorkspace?.id);
+        if (updatedCat) setActiveCatalog(updatedCat);
+      }
+      showToast('Catálogo despublicado. El enlace público ahora figura como no disponible.');
+    } catch (err) {
+      setActionError(formatCloudErrorForUser(err, 'No se pudo despublicar el catálogo.').message);
     }
-    setUnpublishCatalogTarget(null);
-    await loadData();
-    showToast('Catálogo despublicado. El enlace público ahora figura como no disponible.');
   };
 
   const handleCopyPublicLink = (cat: Catalog) => {
@@ -222,10 +277,19 @@ export const CatalogsPage: React.FC = () => {
 
   const handleSaveCatalog = async () => {
     if (!activeCatalog) return;
-    const updated = await mockDataService.updateCatalog(activeCatalog.id, activeCatalog);
-    setActiveCatalog(updated);
-    await loadData();
-    showToast('Catálogo guardado correctamente.');
+    setActionError(null);
+    try {
+      const updated = await dataService.updateCatalog(
+        activeCatalog.id,
+        activeCatalog,
+        currentWorkspace?.id
+      );
+      await loadData();
+      setActiveCatalog(updated);
+      showToast('Catálogo guardado correctamente.');
+    } catch (err) {
+      setActionError(formatCloudErrorForUser(err, 'No se pudo guardar el borrador del catálogo.').message);
+    }
   };
 
   // --- PRODUCT PICKER HANDLERS ---
@@ -354,7 +418,7 @@ export const CatalogsPage: React.FC = () => {
 
       showToast('PDF exportado exitosamente.');
     } catch (err: any) {
-      alert(`Error al generar PDF: ${err?.message || err}`);
+      setActionError(formatCloudErrorForUser(err, 'Error al generar PDF.').message);
     } finally {
       setExportingProgress(null);
     }
@@ -438,7 +502,31 @@ export const CatalogsPage: React.FC = () => {
           </button>
         </div>
 
-        {/* Catalogs Grid */}
+        {actionError && (
+          <div className="p-4 bg-rose-50 dark:bg-rose-950/70 border border-rose-200 dark:border-rose-900 rounded-2xl flex items-center justify-between gap-3 text-xs text-rose-800 dark:text-rose-200">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>{actionError}</span>
+            </div>
+            <button onClick={() => setActionError(null)} className="font-bold">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
+        {queryError ? (
+          <QueryStateAlert error={queryError} onRetry={() => void loadData()} />
+        ) : catalogs.length === 0 ? (
+          <div className="p-12 text-center bg-white dark:bg-slate-900 border border-dashed border-slate-300 dark:border-slate-800 rounded-3xl space-y-3">
+            <BookOpen className="w-10 h-10 mx-auto text-slate-400 stroke-1" />
+            <h3 className="text-base font-bold text-slate-900 dark:text-white">
+              Aún no hay catálogos en este workspace
+            </h3>
+            <p className="text-xs text-slate-500 max-w-sm mx-auto">
+              Crea tu primer catálogo comercial para diseñar tu revista virtual y exportarla en PDF.
+            </p>
+          </div>
+        ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {catalogs.map((catalog) => {
             const templateInfo = CATALOG_TEMPLATES.find((t) => t.id === catalog.templateId) || CATALOG_TEMPLATES[0];
@@ -590,6 +678,7 @@ export const CatalogsPage: React.FC = () => {
             );
           })}
         </div>
+        )}
 
         {/* Delete confirmation modal */}
         {deleteConfirmId && (
@@ -637,6 +726,18 @@ export const CatalogsPage: React.FC = () => {
         <div className="fixed top-20 right-6 z-50 flex items-center gap-2 px-4 py-2.5 bg-slate-900 text-white rounded-2xl shadow-xl text-xs font-semibold animate-in slide-in-from-top-2">
           <CheckCircle2 className="w-4 h-4 text-emerald-400" />
           <span>{toastMessage}</span>
+        </div>
+      )}
+
+      {actionError && (
+        <div className="p-4 bg-rose-50 dark:bg-rose-950/70 border border-rose-200 dark:border-rose-900 rounded-2xl flex items-center justify-between gap-3 text-xs text-rose-800 dark:text-rose-200">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>{actionError}</span>
+          </div>
+          <button onClick={() => setActionError(null)} className="font-bold">
+            <X className="w-4 h-4" />
+          </button>
         </div>
       )}
 

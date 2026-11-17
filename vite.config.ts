@@ -45,6 +45,18 @@ export default defineConfig(() => {
         },
         workbox: {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+          maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+          navigateFallbackDenylist: [/^\/__\/auth/, /^\/api/],
+          runtimeCaching: [
+            {
+              urlPattern: /^https:\/\/(firestore|identitytoolkit|securetoken|firebasestorage)\.googleapis\.com\/.*/i,
+              handler: 'NetworkOnly',
+            },
+            {
+              urlPattern: /^https:\/\/.*\.firebaseapp\.com\/__\/auth\/.*/i,
+              handler: 'NetworkOnly',
+            },
+          ],
         },
         devOptions: {
           enabled: true,

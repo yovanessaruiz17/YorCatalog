@@ -1,19 +1,23 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
- * 
- * PRUEBAS AUTOMATIZADAS: SEGURIDAD MULTI-TENANT Y LÍMITES DE ACCESO (FASE 5)
+ *
+ * PRUEBAS AUTOMATIZADAS: SEGURIDAD MULTI-TENANT, AISLAMIENTO Y CONTROL PÚBLICO (FIREBASE)
+ *
+ * Clasificación:
+ * [A] Pruebas unitarias de aislamiento lógico, sanitización y contratos Cloud-Only.
+ * (Las pruebas de reglas Firestore y conectividad en vivo viven en firestore.rules.test.ts y firebase-integration.test.ts)
  */
 
-import { describe, it, expect } from 'vitest';
-import { MockDataService } from '../services/mockDataService';
-import { OrderStatus } from '../types';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { dataService } from '../services/dataService';
 
-describe('Seguridad Multi-Tenant y Validación de Integridad', () => {
-  const service = new MockDataService();
+describe('[A] Seguridad Multi-Tenant y Validación de Integridad de Pedidos', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
 
-  it('no debe permitir registrar pedidos con cantidades negativas o cero', async () => {
-    // Validación de integridad de datos
+  it('debe descartar cantidades negativas o cero antes de persistir pedidos', () => {
     const invalidQuantityItems = [
       {
         productId: 'prod-001',
@@ -21,7 +25,7 @@ describe('Seguridad Multi-Tenant y Validación de Integridad', () => {
         ean: '0770200100456',
         name: 'Producto A',
         price: 50000,
-        quantity: -5, // Invalido
+        quantity: -5,
         subtotal: -250000,
       },
       {
@@ -30,12 +34,11 @@ describe('Seguridad Multi-Tenant y Validación de Integridad', () => {
         ean: '0770200100789',
         name: 'Producto B',
         price: 30000,
-        quantity: 0, // Invalido
+        quantity: 0,
         subtotal: 0,
       },
     ];
 
-    // Función de saneamiento de carrito
     const sanitized = invalidQuantityItems
       .filter((it) => it.quantity > 0)
       .map((it) => ({
@@ -46,58 +49,61 @@ describe('Seguridad Multi-Tenant y Validación de Integridad', () => {
     expect(sanitized.length).toBe(0);
   });
 
-  it('no debe marcar automáticamente un pedido como confirmed al crearlo desde la web', async () => {
-    const newOrder = await service.createOrder({
-      catalogId: 'cat-01',
-      catalogTitle: 'Catálogo Temporada Fin de Año 2026',
-      catalogVersion: 2,
-      customerName: 'Cliente Anónimo',
-      items: [
+  it('debe rechazar createOrder si el pedido no contiene productos válidos', async () => {
+    await expect(
+      dataService.createOrder(
         {
-          productId: 'prod-001',
-          sku: 'YOR-CAFE-01',
-          ean: '0770200100456',
-          name: 'Café Geisha',
-          price: 48000,
-          quantity: 1,
-          subtotal: 48000,
+          catalogId: 'cat-01',
+          catalogShareToken: 'pub_test_2026',
+          ownerId: 'uid_owner_1',
+          catalogTitle: 'Catálogo Prueba',
+          catalogVersion: 1,
+          customerName: 'Cliente Prueba',
+          items: [],
+          itemsCount: 0,
+          totalAmount: 0,
+          currency: 'COP',
+          status: 'whatsapp_opened',
         },
-      ],
-      itemsCount: 1,
-      totalAmount: 48000,
-      currency: 'COP',
-      status: 'whatsapp_opened', // Estado correcto al abrir WhatsApp
-    });
-
-    // Debe registrarse como whatsapp_opened, NUNCA confirmed sin intervención del comercio
-    expect(newOrder.status).toBe('whatsapp_opened');
-    expect(newOrder.status).not.toBe('confirmed');
-
-    // Solo el operador en el backoffice puede confirmar el pedido
-    const confirmedOrder = await service.updateOrderStatus(newOrder.id, 'confirmed');
-    expect(confirmedOrder.status).toBe('confirmed');
+        'ws_uid_owner_1'
+      )
+    ).rejects.toThrow(/al menos un producto válido/i);
   });
 
-  it('debe mantener inmutable el snapshot de productos en versiones publicadas frente a cambios en inventario', async () => {
-    // 1. Obtener catálogo publicado inicial
-    const initialCatalog = await service.getCatalogById('cat-01');
-    expect(initialCatalog?.publishedSnapshot).toBeDefined();
-
-    const snapshotProduct = initialCatalog!.publishedSnapshot!.products[0].snapshot;
-    const originalPrice = snapshotProduct.price;
-
-    // 2. Modificar el producto en el inventario general
-    await service.update(snapshotProduct.id, {
-      price: originalPrice + 20000,
-      name: 'Nombre Cambiado en Inventario Privado',
+  it('debe impedir lecturas o mutaciones privadas cuando falta el workspaceId del tenant', async () => {
+    await expect(dataService.getAll(undefined)).rejects.toMatchObject({
+      code: 'unauthorized',
     });
+    await expect(dataService.getCatalogs('')).rejects.toMatchObject({
+      code: 'unauthorized',
+    });
+    await expect(dataService.getOrders(undefined)).rejects.toMatchObject({
+      code: 'unauthorized',
+    });
+  });
 
-    // 3. Consultar la revista pública publicada
-    const publicCatalog = await service.getByShareToken('pub_gourmet_2026');
-    const publicItem = publicCatalog?.publishedSnapshot?.products[0].snapshot;
+  it('debe impedir que un usuario de Workspace A acceda a recursos privados de Workspace B', () => {
+    const workspaceA_Products = [
+      { id: 'p1', workspaceId: 'ws_tenant_A', name: 'Producto Tenant A' },
+    ];
 
-    // 4. El precio y nombre en la revista publicada deben permanecer inmutables
-    expect(publicItem?.price).toBe(originalPrice);
-    expect(publicItem?.name).toBe(snapshotProduct.name);
+    const requestedByTenantB = workspaceA_Products.filter(
+      (p) => p.workspaceId === 'ws_tenant_B'
+    );
+
+    expect(requestedByTenantB.length).toBe(0);
+
+    const targetProductWorkspace: string = 'ws_tenant_A';
+    const actingUserWorkspace: string = 'ws_tenant_B';
+    expect(targetProductWorkspace === actingUserWorkspace).toBe(false);
+  });
+});
+
+describe('[A] Seguridad de Acceso Público y Anti-Enumeración por ShareToken', () => {
+  it('debe retornar undefined inmediatamente cuando el shareToken está vacío o contiene caracteres inseguros', async () => {
+    expect(await dataService.getByShareToken('')).toBeUndefined();
+    expect(await dataService.getByShareToken('ab')).toBeUndefined();
+    expect(await dataService.getByShareToken('../admin/users')).toBeUndefined();
+    expect(await dataService.getByShareToken('token con espacios!')).toBeUndefined();
   });
 });

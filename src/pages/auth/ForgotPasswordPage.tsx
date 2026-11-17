@@ -8,10 +8,11 @@
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
+import { CloudOnlyNotice } from '../../components/common/CloudOnlyNotice';
 import { BookOpen, Mail, ArrowLeft, Send, CheckCircle2, AlertCircle } from 'lucide-react';
 
 export const ForgotPasswordPage: React.FC = () => {
-  const { resetPassword } = useAuth();
+  const { resetPassword, isLiveFirebase } = useAuth();
   const [email, setEmail] = useState('');
   const [success, setSuccess] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -19,6 +20,10 @@ export const ForgotPasswordPage: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isLiveFirebase) {
+      setError('Firebase Auth no está configurado. No es posible enviar recuperación de contraseña.');
+      return;
+    }
     setError(null);
     setLoading(true);
 
@@ -52,6 +57,8 @@ export const ForgotPasswordPage: React.FC = () => {
 
       <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md px-4">
         <div className="bg-white dark:bg-slate-900 py-8 px-6 sm:px-10 shadow-xl shadow-slate-200/50 dark:shadow-none border border-slate-200/80 dark:border-slate-800 rounded-3xl space-y-6">
+          {!isLiveFirebase && <CloudOnlyNotice variant="card" />}
+
           {error && (
             <div className="p-3 bg-rose-50 dark:bg-rose-950/80 border border-rose-200 dark:border-rose-900 rounded-2xl flex items-center gap-2 text-xs text-rose-700 dark:text-rose-300">
               <AlertCircle className="w-4 h-4 shrink-0" />
@@ -91,17 +98,18 @@ export const ForgotPasswordPage: React.FC = () => {
                   <input
                     type="email"
                     required
+                    disabled={!isLiveFirebase}
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="admin@tu-comercio.com"
-                    className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-emerald-500 text-slate-900 dark:text-white"
+                    className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-emerald-500 text-slate-900 dark:text-white disabled:opacity-50"
                   />
                 </div>
               </div>
 
               <button
                 type="submit"
-                disabled={loading}
+                disabled={loading || !isLiveFirebase}
                 className="w-full py-2.5 px-4 bg-slate-950 dark:bg-emerald-600 hover:bg-slate-800 dark:hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold rounded-xl shadow-xs flex items-center justify-center gap-2 transition"
               >
                 <Send className="w-4 h-4" />

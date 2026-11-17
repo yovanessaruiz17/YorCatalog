@@ -31,7 +31,10 @@ import {
   HelpCircle,
 } from 'lucide-react';
 import { useSettings } from '../context/SettingsContext';
-import { mockDataService } from '../services/mockDataService';
+import { dataService } from '../services/dataService';
+import { formatCloudErrorForUser } from '../services/firebaseClient';
+import { QueryStateAlert, QueryErrorState } from '../components/common/QueryStateAlert';
+import { useAuth } from '../context/AuthContext';
 import {
   parseCSVString,
   buildColumnMappings,
@@ -70,6 +73,7 @@ const AVAILABLE_FIELDS: { key: ProductFieldKey | 'ignore'; label: string; requir
 
 export const ImportPage: React.FC = () => {
   const { t, formatDate, formatPrice } = useSettings();
+  const { currentWorkspace } = useAuth();
   const [currentStep, setCurrentStep] = useState<Step>('select');
   const [file, setFile] = useState<File | null>(null);
   const [rawText, setRawText] = useState<string>('');
@@ -78,6 +82,10 @@ export const ImportPage: React.FC = () => {
   const [validationResult, setValidationResult] = useState<ParsedCSVResult | null>(null);
   const [existingProducts, setExistingProducts] = useState<Product[]>([]);
   const [history, setHistory] = useState<ImportRecord[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(true);
+  const [queryError, setQueryError] = useState<QueryErrorState | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
 
   // Import options
   const [options, setOptions] = useState<ImportOptions>({
@@ -94,28 +102,55 @@ export const ImportPage: React.FC = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [validationFilter, setValidationFilter] = useState<'all' | 'error' | 'warning' | 'valid'>('all');
 
-  useEffect(() => {
-    loadData();
-  }, []);
-
   const loadData = async () => {
-    const [prods, hist] = await Promise.all([
-      mockDataService.getAll(),
-      mockDataService.getHistory(),
-    ]);
-    setExistingProducts(prods);
-    setHistory(hist);
+    const wsId = currentWorkspace?.id;
+    setExistingProducts([]);
+    setHistory([]);
+    setQueryError(null);
+
+    if (!wsId) {
+      setLoadingHistory(false);
+      return;
+    }
+
+    setLoadingHistory(true);
+    try {
+      const [prods, hist] = await Promise.all([
+        dataService.getAll(wsId),
+        dataService.getHistory(wsId),
+      ]);
+      setExistingProducts(prods);
+      setHistory(hist);
+    } catch (err) {
+      setQueryError(formatCloudErrorForUser(err, 'No se pudo cargar el historial ni el inventario del workspace.'));
+    } finally {
+      setLoadingHistory(false);
+    }
   };
+
+  useEffect(() => {
+    setCurrentStep('select');
+    setFile(null);
+    setRawText('');
+    setMappings([]);
+    setRawRecords([]);
+    setValidationResult(null);
+    setImportSummary(null);
+    setActionError(null);
+    setShowResetConfirm(false);
+    void loadData();
+  }, [currentWorkspace?.id]);
 
   // Step A: Handle file selection
   const handleFileChange = (selectedFile: File) => {
+    setActionError(null);
     if (!selectedFile.name.endsWith('.csv') && !selectedFile.name.endsWith('.txt')) {
-      alert('Por favor selecciona un archivo con formato .csv o .txt válido.');
+      setActionError('Por favor selecciona un archivo con formato .csv o .txt válido.');
       return;
     }
 
     if (selectedFile.size > 10 * 1024 * 1024) {
-      alert('El archivo supera el límite de seguridad de 10 MB.');
+      setActionError('El archivo supera el límite de seguridad de 10 MB.');
       return;
     }
 
@@ -167,10 +202,11 @@ export const ImportPage: React.FC = () => {
 
   // Step B -> C: Run validation
   const handleProceedToValidation = () => {
+    setActionError(null);
     // Check that at least name, sku, and price are mapped
     const mappedFields = new Set(mappings.map((m) => m.targetField));
     if (!mappedFields.has('name') || !mappedFields.has('sku') || !mappedFields.has('price')) {
-      alert('Debes mapear obligatoriamente las columnas de Nombre, SKU y Precio.');
+      setActionError('Debes mapear obligatoriamente las columnas de Nombre, SKU y Precio.');
       return;
     }
 
@@ -196,22 +232,27 @@ export const ImportPage: React.FC = () => {
   const handleExecuteImport = async () => {
     if (!validationResult || !file) return;
 
+    setActionError(null);
+    setImportSummary(null);
     setCurrentStep('importing');
     setIsProcessing(true);
     setProgress(10);
 
     try {
-      const record = await mockDataService.importProducts(
+      const record = await dataService.importProducts(
         validationResult.rows,
         options,
         file.name,
+        currentWorkspace?.id,
         (pct) => setProgress(pct)
       );
 
       setImportSummary(record);
       await loadData();
-    } catch (e: any) {
-      alert(`Error durante la importación: ${e?.message || e}`);
+    } catch (e) {
+      setActionError(formatCloudErrorForUser(e, 'Error durante la importación en Cloud Firestore.').message);
+      // Conservar mappings y filas validadas para reintentar
+      setCurrentStep('conflicts');
     } finally {
       setIsProcessing(false);
     }
@@ -244,13 +285,7 @@ export const ImportPage: React.FC = () => {
 
         {currentStep !== 'select' && currentStep !== 'importing' && (
           <button
-            onClick={() => {
-              if (confirm('¿Deseas reiniciar el proceso de importación?')) {
-                setCurrentStep('select');
-                setFile(null);
-                setValidationResult(null);
-              }
-            }}
+            onClick={() => setShowResetConfirm(true)}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-slate-500 hover:text-slate-900 dark:hover:text-white rounded-lg border border-slate-200 dark:border-slate-800"
           >
             <RefreshCw className="w-3.5 h-3.5" />
@@ -258,6 +293,46 @@ export const ImportPage: React.FC = () => {
           </button>
         )}
       </div>
+
+      {actionError && (
+        <div className="p-4 bg-rose-50 dark:bg-rose-950/70 border border-rose-200 dark:border-rose-900 rounded-2xl flex items-center justify-between gap-3 text-xs text-rose-800 dark:text-rose-200">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>{actionError}</span>
+          </div>
+          <button onClick={() => setActionError(null)} className="font-bold">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {showResetConfirm && (
+        <div className="p-4 bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-800 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+          <span className="font-semibold text-amber-900 dark:text-amber-200">
+            ¿Deseas reiniciar el asistente de importación y descartar el archivo actual?
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                setCurrentStep('select');
+                setFile(null);
+                setValidationResult(null);
+                setActionError(null);
+                setShowResetConfirm(false);
+              }}
+              className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white font-bold rounded-lg transition"
+            >
+              Sí, reiniciar
+            </button>
+            <button
+              onClick={() => setShowResetConfirm(false)}
+              className="px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-semibold rounded-lg"
+            >
+              Cancelar
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Step Indicator Progress Bar */}
       <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 rounded-2xl shadow-xs">
@@ -818,6 +893,17 @@ export const ImportPage: React.FC = () => {
           </h3>
         </div>
 
+        {loadingHistory ? (
+          <div className="py-6 flex justify-center">
+            <div className="animate-spin rounded-full h-6 w-6 border-2 border-slate-900 dark:border-emerald-500 border-t-transparent" />
+          </div>
+        ) : queryError ? (
+          <QueryStateAlert error={queryError} onRetry={() => void loadData()} />
+        ) : history.length === 0 ? (
+          <p className="text-xs text-slate-500 py-4 text-center">
+            Aún no hay importaciones registradas en este workspace.
+          </p>
+        ) : (
         <div className="space-y-3">
           {history.map((record) => (
             <div
@@ -855,6 +941,7 @@ export const ImportPage: React.FC = () => {
             </div>
           ))}
         </div>
+        )}
       </div>
     </div>
   );

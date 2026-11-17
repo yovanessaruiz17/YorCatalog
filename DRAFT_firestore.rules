@@ -1,0 +1,531 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Hardened Global Helpers
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isWorkspaceOwner(workspaceId) {
+      return isVerifiedUser() &&
+        exists(/databases/$(database)/documents/workspaces/$(workspaceId)) &&
+        get(/databases/$(database)/documents/workspaces/$(workspaceId)).data.ownerId == request.auth.uid;
+    }
+
+    function isWorkspaceMember(workspaceId) {
+      return isVerifiedUser() && (
+        exists(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(request.auth.uid)) ||
+        isWorkspaceOwner(workspaceId)
+      );
+    }
+
+    function isWorkspaceAdmin(workspaceId) {
+      return isVerifiedUser() && (
+        isWorkspaceOwner(workspaceId) ||
+        (exists(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(request.auth.uid)).data.role in ['owner', 'admin'])
+      );
+    }
+
+    function isValidCurrency(val) {
+      return val is string && val.size() <= 10 && val in ['COP', 'USD', 'EUR', 'MXN'];
+    }
+
+    function isValidLanguage(val) {
+      return val is string && val.size() <= 10 && val in ['es', 'en'];
+    }
+
+    function isValidTheme(val) {
+      return val is string && val.size() <= 16 && val in ['light', 'dark', 'system'];
+    }
+
+    // 3. Entity Validation Blueprints
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['id', 'email', 'fullName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'email', 'fullName', 'avatarUrl', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.id == userId &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
+        (!('avatarUrl' in data) || data.avatarUrl == null || (data.avatarUrl is string && data.avatarUrl.size() <= 1000)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidWorkspace(data, workspaceId) {
+      return data.keys().hasAll(['id', 'ownerId', 'name', 'slug', 'whatsappNumber', 'currency', 'language', 'theme', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'ownerId', 'name', 'slug', 'tagline', 'logoUrl', 'whatsappNumber', 'contactEmail', 'currency', 'language', 'theme', 'settingsJson', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.id == workspaceId &&
+        isValidId(data.ownerId) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        isValidId(data.slug) && data.slug.size() <= 120 &&
+        (!('tagline' in data) || data.tagline == null || (data.tagline is string && data.tagline.size() <= 240)) &&
+        (!('logoUrl' in data) || data.logoUrl == null || (data.logoUrl is string && data.logoUrl.size() <= 1000)) &&
+        data.whatsappNumber is string && data.whatsappNumber.size() <= 32 &&
+        (!('contactEmail' in data) || data.contactEmail == null || (data.contactEmail is string && data.contactEmail.size() <= 254)) &&
+        isValidCurrency(data.currency) &&
+        isValidLanguage(data.language) &&
+        isValidTheme(data.theme) &&
+        (!('settingsJson' in data) || data.settingsJson is map) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidWorkspaceMember(data, workspaceId, memberId) {
+      return data.keys().hasAll(['id', 'workspaceId', 'userId', 'role', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'workspaceId', 'userId', 'role', 'email', 'fullName', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.id == memberId &&
+        isValidId(data.workspaceId) &&
+        data.workspaceId == workspaceId &&
+        isValidId(data.userId) &&
+        data.userId == memberId &&
+        data.role is string && data.role.size() <= 16 && data.role in ['owner', 'admin', 'member'] &&
+        (!('email' in data) || data.email == null || (data.email is string && data.email.size() <= 254)) &&
+        (!('fullName' in data) || data.fullName == null || (data.fullName is string && data.fullName.size() <= 120)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidCategory(data, workspaceId, categoryId) {
+      return data.keys().hasAll(['id', 'workspaceId', 'ownerId', 'name', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'workspaceId', 'ownerId', 'name', 'description', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.id == categoryId &&
+        isValidId(data.workspaceId) &&
+        data.workspaceId == workspaceId &&
+        isValidId(data.ownerId) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+        (!('description' in data) || data.description == null || (data.description is string && data.description.size() <= 400)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidProduct(data, workspaceId, productId) {
+      return data.keys().hasAll(['id', 'workspaceId', 'ownerId', 'name', 'sku', 'price', 'currency', 'active', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'workspaceId', 'ownerId', 'name', 'description', 'sku', 'ean',
+          'categoryId', 'categoryName', 'brand', 'price', 'compareAtPrice',
+          'currency', 'imageUrl', 'imageVerified', 'imageMatchStatus',
+          'additionalImages', 'stock', 'active', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.id == productId &&
+        isValidId(data.workspaceId) &&
+        data.workspaceId == workspaceId &&
+        isValidId(data.ownerId) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 200 &&
+        (!('description' in data) || data.description == null || (data.description is string && data.description.size() <= 2000)) &&
+        data.sku is string && data.sku.size() >= 1 && data.sku.size() <= 80 &&
+        (!('ean' in data) || data.ean == null || (data.ean is string && data.ean.size() <= 32)) &&
+        (!('categoryId' in data) || data.categoryId == null || (data.categoryId is string && data.categoryId.size() <= 128)) &&
+        (!('categoryName' in data) || data.categoryName == null || (data.categoryName is string && data.categoryName.size() <= 100)) &&
+        (!('brand' in data) || data.brand == null || (data.brand is string && data.brand.size() <= 100)) &&
+        data.price is number && data.price >= 0 &&
+        (!('compareAtPrice' in data) || data.compareAtPrice == null || (data.compareAtPrice is number && data.compareAtPrice >= 0)) &&
+        isValidCurrency(data.currency) &&
+        (!('imageUrl' in data) || data.imageUrl == null || (data.imageUrl is string && data.imageUrl.size() <= 1500)) &&
+        (!('imageVerified' in data) || data.imageVerified is bool) &&
+        (!('imageMatchStatus' in data) || (data.imageMatchStatus is string && data.imageMatchStatus.size() <= 32 && data.imageMatchStatus in ['exact_match', 'pending_review', 'no_image', 'invalid_image', 'confirmed'])) &&
+        (!('additionalImages' in data) || (data.additionalImages is list && data.additionalImages.size() <= 10 && (data.additionalImages.size() == 0 || data.additionalImages[0] is string))) &&
+        (!('stock' in data) || (data.stock is number && data.stock >= 0)) &&
+        data.active is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidImportJob(data, workspaceId, importId) {
+      return data.keys().hasAll(['id', 'workspaceId', 'ownerId', 'fileName', 'totalRows', 'importedCount', 'updatedCount', 'skippedCount', 'duplicatesCount', 'errorsCount', 'status', 'createdAt']) &&
+        data.keys().hasOnly([
+          'id', 'workspaceId', 'ownerId', 'fileName', 'totalRows', 'importedCount',
+          'updatedCount', 'skippedCount', 'duplicatesCount', 'errorsCount',
+          'status', 'conflictResolution', 'errorLog', 'createdAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.id == importId &&
+        isValidId(data.workspaceId) &&
+        data.workspaceId == workspaceId &&
+        isValidId(data.ownerId) &&
+        data.fileName is string && data.fileName.size() >= 1 && data.fileName.size() <= 255 &&
+        data.totalRows is number && data.totalRows >= 0 &&
+        data.importedCount is number && data.importedCount >= 0 &&
+        data.updatedCount is number && data.updatedCount >= 0 &&
+        data.skippedCount is number && data.skippedCount >= 0 &&
+        data.duplicatesCount is number && data.duplicatesCount >= 0 &&
+        data.errorsCount is number && data.errorsCount >= 0 &&
+        data.status is string && data.status.size() <= 20 && data.status in ['completed', 'failed', 'pending'] &&
+        (!('conflictResolution' in data) || (data.conflictResolution is string && data.conflictResolution.size() <= 32 && data.conflictResolution in ['update_existing', 'skip_existing', 'create_new_sku'])) &&
+        (!('errorLog' in data) || (data.errorLog is list && data.errorLog.size() <= 200 && (data.errorLog.size() == 0 || data.errorLog[0] is string))) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidCatalog(data, workspaceId, catalogId) {
+      return data.keys().hasAll([
+          'id', 'workspaceId', 'ownerId', 'internalName', 'title', 'slug',
+          'shareToken', 'status', 'version', 'itemsCount', 'templateId',
+          'visualSettings', 'products', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'workspaceId', 'ownerId', 'internalName', 'title', 'subtitle', 'slug',
+          'shareToken', 'description', 'status', 'version', 'itemsCount',
+          'coverImage', 'logoUrl', 'templateId', 'visualSettings', 'products',
+          'publishedAt', 'publishedUrl', 'publishedSnapshot', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.id == catalogId &&
+        isValidId(data.workspaceId) &&
+        data.workspaceId == workspaceId &&
+        isValidId(data.ownerId) &&
+        data.internalName is string && data.internalName.size() >= 1 && data.internalName.size() <= 160 &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 160 &&
+        (!('subtitle' in data) || data.subtitle == null || (data.subtitle is string && data.subtitle.size() <= 240)) &&
+        isValidId(data.slug) && data.slug.size() <= 128 &&
+        isValidId(data.shareToken) && data.shareToken.size() >= 3 && data.shareToken.size() <= 128 &&
+        (!('description' in data) || data.description == null || (data.description is string && data.description.size() <= 2000)) &&
+        data.status is string && data.status.size() <= 20 && data.status in ['draft', 'published', 'archived'] &&
+        data.version is number && data.version >= 1 &&
+        data.itemsCount is number && data.itemsCount >= 0 &&
+        (!('coverImage' in data) || data.coverImage == null || (data.coverImage is string && data.coverImage.size() <= 1500)) &&
+        (!('logoUrl' in data) || data.logoUrl == null || (data.logoUrl is string && data.logoUrl.size() <= 1500)) &&
+        data.templateId is string && data.templateId.size() <= 32 && data.templateId in ['minimal', 'editorial', 'promotional', 'category_grid'] &&
+        data.visualSettings is map &&
+        data.products is list && data.products.size() <= 300 && (data.products.size() == 0 || data.products[0] is map) &&
+        (!('publishedAt' in data) || data.publishedAt == null || (data.publishedAt is string && data.publishedAt.size() <= 64) || data.publishedAt is timestamp) &&
+        (!('publishedUrl' in data) || data.publishedUrl == null || (data.publishedUrl is string && data.publishedUrl.size() <= 1000)) &&
+        (!('publishedSnapshot' in data) || data.publishedSnapshot == null || data.publishedSnapshot is map) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPublishedCatalog(data, shareToken) {
+      return data.keys().hasAll([
+          'id', 'catalogId', 'workspaceId', 'ownerId', 'businessName', 'whatsappNumber',
+          'currency', 'language', 'title', 'slug', 'shareToken', 'status', 'version',
+          'itemsCount', 'templateId', 'visualSettings', 'products', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'catalogId', 'workspaceId', 'ownerId', 'businessName', 'whatsappNumber',
+          'currency', 'language', 'title', 'subtitle', 'slug', 'shareToken',
+          'description', 'status', 'version', 'itemsCount', 'coverImage', 'logoUrl',
+          'templateId', 'visualSettings', 'products', 'publishedAt', 'publishedUrl',
+          'publishedSnapshot', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.id == shareToken &&
+        isValidId(data.catalogId) &&
+        isValidId(data.workspaceId) &&
+        isValidId(data.ownerId) &&
+        data.businessName is string && data.businessName.size() >= 1 && data.businessName.size() <= 120 &&
+        data.whatsappNumber is string && data.whatsappNumber.size() <= 32 &&
+        isValidCurrency(data.currency) &&
+        isValidLanguage(data.language) &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 160 &&
+        (!('subtitle' in data) || data.subtitle == null || (data.subtitle is string && data.subtitle.size() <= 240)) &&
+        isValidId(data.slug) && data.slug.size() <= 128 &&
+        isValidId(data.shareToken) && data.shareToken == shareToken && data.shareToken.size() >= 3 &&
+        (!('description' in data) || data.description == null || (data.description is string && data.description.size() <= 2000)) &&
+        data.status is string && data.status.size() <= 20 && data.status in ['draft', 'published', 'archived'] &&
+        data.version is number && data.version >= 1 &&
+        data.itemsCount is number && data.itemsCount >= 0 &&
+        (!('coverImage' in data) || data.coverImage == null || (data.coverImage is string && data.coverImage.size() <= 1500)) &&
+        (!('logoUrl' in data) || data.logoUrl == null || (data.logoUrl is string && data.logoUrl.size() <= 1500)) &&
+        data.templateId is string && data.templateId.size() <= 32 && data.templateId in ['minimal', 'editorial', 'promotional', 'category_grid'] &&
+        data.visualSettings is map &&
+        data.products is list && data.products.size() <= 300 && (data.products.size() == 0 || data.products[0] is map) &&
+        (!('publishedAt' in data) || data.publishedAt == null || (data.publishedAt is string && data.publishedAt.size() <= 64) || data.publishedAt is timestamp) &&
+        (!('publishedUrl' in data) || data.publishedUrl == null || (data.publishedUrl is string && data.publishedUrl.size() <= 1000)) &&
+        (!('publishedSnapshot' in data) || data.publishedSnapshot == null || data.publishedSnapshot is map) &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidOrder(data, workspaceId, orderId) {
+      return data.keys().hasAll([
+          'id', 'workspaceId', 'ownerId', 'orderNumber', 'customerName', 'items',
+          'itemsCount', 'totalAmount', 'currency', 'status', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'workspaceId', 'ownerId', 'orderNumber', 'catalogId', 'catalogShareToken',
+          'catalogTitle', 'catalogVersion', 'customerName', 'customerPhone', 'customerCity',
+          'customerAddress', 'notes', 'items', 'itemsCount', 'totalAmount', 'currency',
+          'status', 'whatsappUrl', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.id == orderId &&
+        isValidId(data.workspaceId) &&
+        data.workspaceId == workspaceId &&
+        isValidId(data.ownerId) &&
+        data.orderNumber is string && data.orderNumber.size() >= 1 && data.orderNumber.size() <= 64 &&
+        (!('catalogId' in data) || data.catalogId == null || (data.catalogId is string && data.catalogId.size() <= 128)) &&
+        (!('catalogShareToken' in data) || data.catalogShareToken == null || isValidId(data.catalogShareToken)) &&
+        (!('catalogTitle' in data) || data.catalogTitle == null || (data.catalogTitle is string && data.catalogTitle.size() <= 160)) &&
+        (!('catalogVersion' in data) || data.catalogVersion == null || data.catalogVersion is number) &&
+        data.customerName is string && data.customerName.size() >= 1 && data.customerName.size() <= 140 &&
+        (!('customerPhone' in data) || data.customerPhone == null || (data.customerPhone is string && data.customerPhone.size() <= 40)) &&
+        (!('customerCity' in data) || data.customerCity == null || (data.customerCity is string && data.customerCity.size() <= 100)) &&
+        (!('customerAddress' in data) || data.customerAddress == null || (data.customerAddress is string && data.customerAddress.size() <= 300)) &&
+        (!('notes' in data) || data.notes == null || (data.notes is string && data.notes.size() <= 1000)) &&
+        data.items is list && data.items.size() >= 1 && data.items.size() <= 200 && data.items[0] is map &&
+        data.itemsCount is number && data.itemsCount >= 1 &&
+        data.totalAmount is number && data.totalAmount >= 0 &&
+        isValidCurrency(data.currency) &&
+        data.status is string && data.status.size() <= 32 && data.status in ['whatsapp_opened', 'pending_whatsapp', 'prepared', 'confirmed', 'cancelled'] &&
+        (!('whatsappUrl' in data) || data.whatsappUrl == null || (data.whatsappUrl is string && data.whatsappUrl.size() <= 4000)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // 4. Connectivity Check Document (read-only boot validation)
+    match /test/connection {
+      allow get: if true;
+      allow list, write: if false;
+    }
+
+    // 5. User Profiles (PII Isolated to Owner Only)
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow list: if false;
+      allow create: if isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUserProfile(incoming(), userId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUserProfile(incoming(), userId) &&
+        incoming().id == existing().id &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'avatarUrl', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    // 6. Workspaces (Multi-Tenant Root)
+    match /workspaces/{workspaceId} {
+      allow get: if isValidId(workspaceId) && isVerifiedUser() && (
+        workspaceId == ('ws_' + request.auth.uid) ||
+        (resource != null && existing().ownerId == request.auth.uid) ||
+        isWorkspaceMember(workspaceId)
+      );
+      allow list: if isVerifiedUser() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerifiedUser() &&
+        isValidId(workspaceId) &&
+        isValidWorkspace(incoming(), workspaceId) &&
+        incoming().ownerId == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isWorkspaceAdmin(workspaceId) &&
+        isValidId(workspaceId) &&
+        isValidWorkspace(incoming(), workspaceId) &&
+        incoming().id == existing().id &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'tagline', 'logoUrl', 'whatsappNumber', 'contactEmail',
+          'currency', 'language', 'theme', 'settingsJson', 'updatedAt'
+        ]);
+      allow delete: if isWorkspaceOwner(workspaceId) && isValidId(workspaceId);
+
+      // 6.1 Workspace Members Subcollection
+      match /members/{memberId} {
+        allow get: if isValidId(memberId) && (isOwner(memberId) || isWorkspaceMember(workspaceId));
+        allow list: if isWorkspaceMember(workspaceId);
+        allow create: if isVerifiedUser() &&
+          isValidId(workspaceId) &&
+          isValidId(memberId) &&
+          isValidWorkspaceMember(incoming(), workspaceId, memberId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          (
+            (isOwner(memberId) && incoming().role == 'owner' && getAfter(/databases/$(database)/documents/workspaces/$(workspaceId)).data.ownerId == request.auth.uid) ||
+            isWorkspaceOwner(workspaceId)
+          );
+        allow update: if isWorkspaceOwner(workspaceId) &&
+          isValidId(memberId) &&
+          isValidWorkspaceMember(incoming(), workspaceId, memberId) &&
+          incoming().id == existing().id &&
+          incoming().workspaceId == existing().workspaceId &&
+          incoming().userId == existing().userId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['role', 'email', 'fullName', 'updatedAt']);
+        allow delete: if isWorkspaceOwner(workspaceId) && isValidId(memberId) && memberId != request.auth.uid;
+      }
+
+      // 6.2 Categories Subcollection
+      match /categories/{categoryId} {
+        allow get: if isValidId(categoryId) && isWorkspaceMember(workspaceId);
+        allow list: if isWorkspaceMember(workspaceId);
+        allow create: if isWorkspaceMember(workspaceId) &&
+          isValidId(categoryId) &&
+          isValidCategory(incoming(), workspaceId, categoryId) &&
+          incoming().ownerId == get(/databases/$(database)/documents/workspaces/$(workspaceId)).data.ownerId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isWorkspaceMember(workspaceId) &&
+          isValidId(categoryId) &&
+          isValidCategory(incoming(), workspaceId, categoryId) &&
+          incoming().id == existing().id &&
+          incoming().workspaceId == existing().workspaceId &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'updatedAt']);
+        allow delete: if isWorkspaceMember(workspaceId) && isValidId(categoryId);
+      }
+
+      // 6.3 Products Subcollection
+      match /products/{productId} {
+        allow get: if isValidId(productId) && isWorkspaceMember(workspaceId);
+        allow list: if isWorkspaceMember(workspaceId);
+        allow create: if isWorkspaceMember(workspaceId) &&
+          isValidId(productId) &&
+          isValidProduct(incoming(), workspaceId, productId) &&
+          incoming().ownerId == get(/databases/$(database)/documents/workspaces/$(workspaceId)).data.ownerId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isWorkspaceMember(workspaceId) &&
+          isValidId(productId) &&
+          isValidProduct(incoming(), workspaceId, productId) &&
+          incoming().id == existing().id &&
+          incoming().workspaceId == existing().workspaceId &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'description', 'sku', 'ean', 'categoryId', 'categoryName',
+            'brand', 'price', 'compareAtPrice', 'currency', 'imageUrl',
+            'imageVerified', 'imageMatchStatus', 'additionalImages', 'stock',
+            'active', 'updatedAt'
+          ]);
+        allow delete: if isWorkspaceMember(workspaceId) && isValidId(productId);
+      }
+
+      // 6.4 Import Jobs Subcollection (Immutable audit logs)
+      match /importJobs/{importId} {
+        allow get: if isValidId(importId) && isWorkspaceMember(workspaceId);
+        allow list: if isWorkspaceMember(workspaceId);
+        allow create: if isWorkspaceMember(workspaceId) &&
+          isValidId(importId) &&
+          isValidImportJob(incoming(), workspaceId, importId) &&
+          incoming().ownerId == get(/databases/$(database)/documents/workspaces/$(workspaceId)).data.ownerId &&
+          incoming().createdAt == request.time;
+        allow update, delete: if false;
+      }
+
+      // 6.5 Catalogs Subcollection
+      match /catalogs/{catalogId} {
+        allow get: if isValidId(catalogId) && isWorkspaceMember(workspaceId);
+        allow list: if isWorkspaceMember(workspaceId);
+        allow create: if isWorkspaceMember(workspaceId) &&
+          isValidId(catalogId) &&
+          isValidCatalog(incoming(), workspaceId, catalogId) &&
+          incoming().ownerId == get(/databases/$(database)/documents/workspaces/$(workspaceId)).data.ownerId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isWorkspaceMember(workspaceId) &&
+          isValidId(catalogId) &&
+          isValidCatalog(incoming(), workspaceId, catalogId) &&
+          incoming().id == existing().id &&
+          incoming().workspaceId == existing().workspaceId &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'internalName', 'title', 'subtitle', 'slug', 'shareToken', 'description',
+              'templateId', 'visualSettings', 'products', 'itemsCount', 'coverImage',
+              'logoUrl', 'updatedAt'
+            ]) ||
+            (incoming().status == 'published' && incoming().diff(existing()).affectedKeys().hasOnly([
+              'internalName', 'title', 'subtitle', 'slug', 'shareToken', 'description',
+              'templateId', 'visualSettings', 'products', 'itemsCount', 'coverImage',
+              'logoUrl', 'status', 'version', 'publishedAt', 'publishedUrl',
+              'publishedSnapshot', 'updatedAt'
+            ])) ||
+            (incoming().status == 'draft' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'publishedAt', 'publishedUrl', 'updatedAt']))
+          );
+        allow delete: if isWorkspaceMember(workspaceId) && isValidId(catalogId);
+      }
+
+      // 6.6 Orders Subcollection (Strict PII Isolation + Validated Public Order Submission)
+      match /orders/{orderId} {
+        allow get: if isValidId(orderId) && isWorkspaceMember(workspaceId);
+        allow list: if isWorkspaceMember(workspaceId);
+        allow create: if isValidId(orderId) &&
+          isValidOrder(incoming(), workspaceId, orderId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          (
+            (
+              isWorkspaceMember(workspaceId) &&
+              incoming().ownerId == get(/databases/$(database)/documents/workspaces/$(workspaceId)).data.ownerId
+            ) ||
+            (
+              incoming().status == 'whatsapp_opened' &&
+              'catalogShareToken' in incoming() &&
+              incoming().catalogShareToken is string &&
+              isValidId(incoming().catalogShareToken) &&
+              exists(/databases/$(database)/documents/publishedCatalogs/$(incoming().catalogShareToken)) &&
+              get(/databases/$(database)/documents/publishedCatalogs/$(incoming().catalogShareToken)).data.status == 'published' &&
+              get(/databases/$(database)/documents/publishedCatalogs/$(incoming().catalogShareToken)).data.workspaceId == workspaceId &&
+              incoming().ownerId == get(/databases/$(database)/documents/publishedCatalogs/$(incoming().catalogShareToken)).data.ownerId
+            )
+          );
+        allow update: if isWorkspaceMember(workspaceId) &&
+          isValidId(orderId) &&
+          isValidOrder(incoming(), workspaceId, orderId) &&
+          incoming().id == existing().id &&
+          incoming().workspaceId == existing().workspaceId &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          existing().status != 'cancelled' &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'notes', 'updatedAt']);
+        allow delete: if isWorkspaceMember(workspaceId) && isValidId(orderId);
+      }
+    }
+
+    // 7. Published Catalogs (Public single-doc access by shareToken ONLY; list strictly denied)
+    match /publishedCatalogs/{shareToken} {
+      allow get: if isValidId(shareToken) && resource != null && existing().status == 'published';
+      allow list: if false;
+      allow create, update: if isVerifiedUser() &&
+        isValidId(shareToken) &&
+        isValidPublishedCatalog(incoming(), shareToken) &&
+        incoming().updatedAt == request.time &&
+        isWorkspaceMember(incoming().workspaceId) &&
+        incoming().ownerId == get(/databases/$(database)/documents/workspaces/$(incoming().workspaceId)).data.ownerId;
+      allow delete: if isVerifiedUser() &&
+        isValidId(shareToken) &&
+        isWorkspaceMember(existing().workspaceId);
+    }
+  }
+}

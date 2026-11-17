@@ -31,32 +31,58 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { useSettings } from '../context/SettingsContext';
-import { mockDataService } from '../services/mockDataService';
+import { dataService } from '../services/dataService';
+import { isFirebaseConfigured, formatCloudErrorForUser } from '../services/firebaseClient';
+import { QueryStateAlert, QueryErrorState } from '../components/common/QueryStateAlert';
 import {
   processImageFile,
   extractImagesFromZip,
   matchImagesWithProducts,
 } from '../services/imageService';
+import { useAuth } from '../context/AuthContext';
 import { CandidateImage, ImageMatchStatus, Product } from '../types';
 
 export const ImagesPage: React.FC = () => {
   const { t, formatPrice } = useSettings();
+  const { currentWorkspace } = useAuth();
   const [products, setProducts] = useState<Product[]>([]);
   const [candidates, setCandidates] = useState<CandidateImage[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingInventory, setLoadingInventory] = useState(true);
+  const [queryError, setQueryError] = useState<QueryErrorState | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<'all' | ImageMatchStatus>('all');
   const [manualModalCandidate, setManualModalCandidate] = useState<CandidateImage | null>(null);
   const [productSearch, setProductSearch] = useState('');
   const [notification, setNotification] = useState<string | null>(null);
 
-  useEffect(() => {
-    loadProducts();
-  }, []);
-
   const loadProducts = async () => {
-    const prods = await mockDataService.getAll();
-    setProducts(prods);
+    const wsId = currentWorkspace?.id;
+    setQueryError(null);
+    if (!wsId) {
+      setProducts([]);
+      setLoadingInventory(false);
+      return;
+    }
+
+    setLoadingInventory(true);
+    try {
+      const prods = await dataService.getAll(wsId);
+      setProducts(prods);
+    } catch (err) {
+      setQueryError(formatCloudErrorForUser(err, 'No se pudo cargar el inventario para asociar imágenes.'));
+    } finally {
+      setLoadingInventory(false);
+    }
   };
+
+  useEffect(() => {
+    setProducts([]);
+    setCandidates([]);
+    setManualModalCandidate(null);
+    setActionError(null);
+    void loadProducts();
+  }, [currentWorkspace?.id]);
 
   const showNotification = (msg: string) => {
     setNotification(msg);
@@ -66,6 +92,7 @@ export const ImagesPage: React.FC = () => {
   // Handle standard multiple image upload
   const handleMultipleFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
+    setActionError(null);
     setLoading(true);
 
     try {
@@ -84,65 +111,27 @@ export const ImagesPage: React.FC = () => {
       const matched = matchImagesWithProducts(newCandidates, products);
       setCandidates((prev) => [...prev, ...matched]);
       showNotification(`Se cargaron y analizaron ${matched.length} imágenes.`);
-    } catch (e: any) {
-      alert(`Error procesando archivos: ${e?.message || e}`);
+    } catch (e) {
+      setActionError(formatCloudErrorForUser(e, 'Error procesando archivos de imagen o ZIP.').message);
     } finally {
       setLoading(false);
     }
   };
 
-  // Preset demo sample images to test without manual files
-  const loadDemoSampleImages = () => {
-    // Generate realistic candidates targeting products prod-005 (Molinillo) and prod-007 (Taza) which are pending images!
-    const sampleCandidates: CandidateImage[] = [
-      {
-        id: `demo-1-${Date.now()}`,
-        filename: '0770200101566.jpg', // Molinillo Manual
-        cleanName: '0770200101566',
-        extension: 'jpg',
-        eanExtracted: '0770200101566',
-        dataUrl: 'https://images.unsplash.com/photo-1589396575653-c09c794ff6a6?w=600&auto=format&fit=crop&q=80',
-        sizeBytes: 142000,
-        matchStatus: 'exact_match',
-        matchedProductId: 'prod-005',
-      },
-      {
-        id: `demo-2-${Date.now()}`,
-        filename: '0770200102006_front.jpg', // Taza Cerámica with suffix
-        cleanName: '0770200102006_front',
-        extension: 'jpg',
-        eanExtracted: '0770200102006',
-        dataUrl: 'https://images.unsplash.com/photo-1514432324607-a09d9b4aefdd?w=600&auto=format&fit=crop&q=80',
-        sizeBytes: 98000,
-        matchStatus: 'exact_match',
-        matchedProductId: 'prod-007',
-      },
-      {
-        id: `demo-3-${Date.now()}`,
-        filename: 'sin_codigo_ean_ejemplo.png', // Unmatched sample
-        cleanName: 'sin_codigo_ean_ejemplo',
-        extension: 'png',
-        eanExtracted: null,
-        dataUrl: 'https://images.unsplash.com/photo-1509042239860-f550ce710b93?w=600&auto=format&fit=crop&q=80',
-        sizeBytes: 85000,
-        matchStatus: 'invalid_image',
-      },
-    ];
-
-    setCandidates((prev) => [...prev, ...sampleCandidates]);
-    showNotification('Se cargaron 3 imágenes de prueba por EAN (incluyendo sufijos).');
-  };
-
   // Confirm single association
   const handleConfirmCandidate = async (candidate: CandidateImage) => {
     if (!candidate.matchedProductId) return;
-
-    await mockDataService.associateImages([candidate]);
-    setCandidates((prev) =>
-      prev.map((c) => (c.id === candidate.id ? { ...c, matchStatus: 'confirmed' } : c))
-    );
-    await loadProducts();
-    showNotification(`Asociación confirmada para "${candidate.filename}".`);
+    setActionError(null);
+    try {
+      await dataService.associateImages([candidate], currentWorkspace?.id);
+      setCandidates((prev) =>
+        prev.map((c) => (c.id === candidate.id ? { ...c, matchStatus: 'confirmed' } : c))
+      );
+      await loadProducts();
+      showNotification(`Asociación confirmada para "${candidate.filename}".`);
+    } catch (err) {
+      setActionError(formatCloudErrorForUser(err, 'No se pudo subir y asociar la imagen en Firebase Storage.').message);
+    }
   };
 
   // Confirm all exact matches in one click
@@ -151,18 +140,23 @@ export const ImagesPage: React.FC = () => {
       (c) => c.matchStatus === 'exact_match' && c.matchedProductId
     );
     if (exactMatches.length === 0) {
-      alert('No hay coincidencias exactas pendientes por confirmar.');
+      setActionError('No hay coincidencias exactas pendientes por confirmar.');
       return;
     }
 
-    const { updated } = await mockDataService.associateImages(exactMatches);
-    setCandidates((prev) =>
-      prev.map((c) =>
-        c.matchStatus === 'exact_match' ? { ...c, matchStatus: 'confirmed' } : c
-      )
-    );
-    await loadProducts();
-    showNotification(`Se confirmaron ${updated} asociaciones de imagen en inventario.`);
+    setActionError(null);
+    try {
+      const { updated } = await dataService.associateImages(exactMatches, currentWorkspace?.id);
+      setCandidates((prev) =>
+        prev.map((c) =>
+          c.matchStatus === 'exact_match' ? { ...c, matchStatus: 'confirmed' } : c
+        )
+      );
+      await loadProducts();
+      showNotification(`Se confirmaron ${updated} asociaciones de imagen en Firebase Storage.`);
+    } catch (err) {
+      setActionError(formatCloudErrorForUser(err, 'Error al asociar las imágenes en lote en Firebase Storage.').message);
+    }
   };
 
   // Remove candidate
@@ -183,13 +177,18 @@ export const ImagesPage: React.FC = () => {
       matchStatus: 'confirmed',
     };
 
-    await mockDataService.associateImages([updatedCandidate]);
-    setCandidates((prev) =>
-      prev.map((c) => (c.id === manualModalCandidate.id ? updatedCandidate : c))
-    );
-    setManualModalCandidate(null);
-    await loadProducts();
-    showNotification(`Imagen vinculada manualmente a "${prod.name}".`);
+    setActionError(null);
+    try {
+      await dataService.associateImages([updatedCandidate], currentWorkspace?.id);
+      setCandidates((prev) =>
+        prev.map((c) => (c.id === manualModalCandidate.id ? updatedCandidate : c))
+      );
+      setManualModalCandidate(null);
+      await loadProducts();
+      showNotification(`Imagen vinculada manualmente a "${prod.name}".`);
+    } catch (err) {
+      setActionError(formatCloudErrorForUser(err, 'No se pudo asociar la imagen en Firebase Storage.').message);
+    }
   };
 
   const filteredCandidates = candidates.filter((c) => {
@@ -207,17 +206,31 @@ export const ImagesPage: React.FC = () => {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pb-2 border-b border-slate-200 dark:border-slate-800">
         <div>
-          <div className="flex items-center gap-2 mb-1">
+          <div className="flex items-center gap-2 mb-1 flex-wrap">
             <span className="px-2 py-0.5 text-[10px] font-bold tracking-wider uppercase bg-emerald-100 dark:bg-emerald-950/80 text-emerald-800 dark:text-emerald-300 rounded-md">
               Fase 2 Activa
             </span>
             <span className="text-xs text-slate-400 font-mono">Motor de Coincidencia EAN</span>
+            {isFirebaseConfigured() ? (
+              <span className="px-2 py-0.5 text-[10px] font-semibold bg-blue-100 dark:bg-blue-950/80 text-blue-700 dark:text-blue-300 rounded-md flex items-center gap-1">
+                <ShieldCheck className="w-3 h-3" /> Firebase Storage (catalog-images)
+              </span>
+            ) : (
+              <span className="px-2 py-0.5 text-[10px] font-medium bg-rose-100 dark:bg-rose-950/80 text-rose-800 dark:text-rose-300 rounded-md flex items-center gap-1">
+                <AlertCircle className="w-3 h-3" /> Firebase Storage no configurado
+              </span>
+            )}
           </div>
           <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-slate-900 dark:text-white font-sans">
             {t.images.title}
           </h1>
           <p className="mt-1 text-xs sm:text-sm text-slate-500 dark:text-slate-400">
-            Vinculación masiva de fotografías mediante código de barras EAN o archivo ZIP con verificación visual
+            Vinculación masiva de fotografías mediante código de barras EAN o archivo ZIP con verificación visual.
+            {!isFirebaseConfigured() && (
+              <span className="block mt-0.5 text-[11px] text-rose-600 dark:text-rose-400">
+                Cloud-Only: las cargas están bloqueadas hasta configurar Firebase Storage.
+              </span>
+            )}
           </p>
         </div>
 
@@ -228,6 +241,22 @@ export const ImagesPage: React.FC = () => {
           </div>
         )}
       </div>
+
+      {actionError && (
+        <div className="p-4 bg-rose-50 dark:bg-rose-950/70 border border-rose-200 dark:border-rose-900 rounded-2xl flex items-center justify-between gap-3 text-xs text-rose-800 dark:text-rose-200">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>{actionError}</span>
+          </div>
+          <button onClick={() => setActionError(null)} className="font-bold">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {queryError && (
+        <QueryStateAlert error={queryError} onRetry={() => void loadProducts()} />
+      )}
 
       {/* Upload Zones: Single / Multi / ZIP */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -250,22 +279,16 @@ export const ImagesPage: React.FC = () => {
           <div className="pt-2 flex flex-wrap gap-2">
             <label className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-slate-900 dark:bg-emerald-600 hover:bg-slate-800 dark:hover:bg-emerald-500 rounded-xl cursor-pointer shadow-xs transition">
               <Upload className="w-3.5 h-3.5" />
-              <span>Seleccionar Imágenes o ZIP</span>
+              <span>{loading ? 'Analizando archivos...' : 'Seleccionar Imágenes o ZIP'}</span>
               <input
                 type="file"
                 multiple
+                disabled={loading || !isFirebaseConfigured()}
                 accept=".jpg,.jpeg,.png,.webp,.zip"
                 className="hidden"
                 onChange={(e) => handleMultipleFiles(e.target.files)}
               />
             </label>
-
-            <button
-              onClick={loadDemoSampleImages}
-              className="px-3.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-300 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 rounded-xl border border-slate-200 dark:border-slate-700 transition"
-            >
-              Probar con Imágenes Demo
-            </button>
           </div>
         </div>
 
@@ -540,6 +563,11 @@ export const ImagesPage: React.FC = () => {
           </span>
         </div>
 
+        {loadingInventory ? (
+          <div className="py-8 flex justify-center">
+            <div className="animate-spin rounded-full h-6 w-6 border-2 border-slate-900 dark:border-emerald-500 border-t-transparent" />
+          </div>
+        ) : (
         <div className="divide-y divide-slate-100 dark:divide-slate-800">
           {products.map((p) => (
             <div
@@ -591,6 +619,7 @@ export const ImagesPage: React.FC = () => {
             </div>
           ))}
         </div>
+        )}
       </div>
     </div>
   );

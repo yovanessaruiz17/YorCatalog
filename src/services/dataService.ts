@@ -1,15 +1,15 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
- * 
- * FACHADA UNIFICADA DE DATOS (FASE 5)
- * Conmuta dinámicamente entre persistencia real en Supabase (PostgreSQL) y el adaptador local
- * de alta fidelidad según la disponibilidad de credenciales en el entorno.
+ *
+ * FACHADA DE DATOS CLOUD-ONLY (FIREBASE FIRESTORE + STORAGE)
+ * Conecta exclusivamente con Cloud Firestore y Firebase Storage.
+ * Queda terminantemente prohibido cualquier mecanismo de persistencia local o fallback silencioso.
+ * Si Firebase no está configurado o la sesión/workspace es inválido, las operaciones lanzan CloudOperationError explícito.
  */
 
-import { isSupabaseConfigured, supabase } from './supabaseClient';
-import { supabaseDataService } from './supabaseDataService';
-import { mockDataService } from './mockDataService';
+import { CloudOperationError, isFirebaseConfigured } from './firebaseClient';
+import { firebaseDataService } from './firebaseDataService';
 import {
   Product,
   Category,
@@ -18,114 +18,133 @@ import {
   OrderStatus,
   ImportRecord,
   CandidateImage,
-  ImageMatchStatus,
   ParsedCSVRow,
   ImportOptions,
 } from '../types';
 
 export class UnifiedDataService {
-  private get isLive(): boolean {
-    return isSupabaseConfigured();
+  public get isLive(): boolean {
+    return isFirebaseConfigured();
+  }
+
+  private checkConfigured(): void {
+    if (!this.isLive) {
+      throw new CloudOperationError(
+        'not_configured',
+        'Firebase no está configurado. YorCatalog opera exclusivamente en la nube (Cloud-Only).'
+      );
+    }
+  }
+
+  private requireWorkspace(workspaceId?: string): string {
+    this.checkConfigured();
+    if (!workspaceId) {
+      throw new CloudOperationError(
+        'unauthorized',
+        'Se requiere un workspace activo para operar sobre datos en Cloud Firestore.'
+      );
+    }
+    return workspaceId;
+  }
+
+  public clearRuntimeCaches(): void {
+    firebaseDataService.clearRuntimeCaches();
   }
 
   // --- PRODUCTOS ---
 
   async getAll(workspaceId?: string): Promise<Product[]> {
-    if (this.isLive && workspaceId) {
-      try {
-        return await supabaseDataService.getProducts(workspaceId);
-      } catch (e) {
-        console.warn('Fallback a datos locales por error en Supabase:', e);
-      }
-    }
-    return mockDataService.getAll();
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.getProducts(wsId);
   }
 
-  async getById(id: string): Promise<Product | undefined> {
-    return mockDataService.getById(id);
+  async getById(id: string, workspaceId?: string): Promise<Product | undefined> {
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.getProductById(id, wsId);
   }
 
   async filter(query: {
+    workspaceId?: string;
     search?: string;
     category?: string;
     active?: boolean;
     hasImage?: boolean;
-    imageStatus?: ImageMatchStatus;
   }): Promise<Product[]> {
-    return mockDataService.filter(query);
+    const wsId = this.requireWorkspace(query.workspaceId);
+    const all = await firebaseDataService.getProducts(wsId);
+    return all.filter((p) => {
+      if (
+        query.search &&
+        !p.name.toLowerCase().includes(query.search.toLowerCase()) &&
+        !p.sku.toLowerCase().includes(query.search.toLowerCase())
+      ) {
+        return false;
+      }
+      if (query.category && query.category !== 'all' && p.categoryId !== query.category) {
+        return false;
+      }
+      if (query.active !== undefined && p.active !== query.active) {
+        return false;
+      }
+      if (query.hasImage !== undefined && Boolean(p.imageUrl) !== query.hasImage) {
+        return false;
+      }
+      return true;
+    });
   }
 
   async create(
     product: Omit<Product, 'id' | 'createdAt' | 'updatedAt'>,
     workspaceId?: string
   ): Promise<Product> {
-    if (this.isLive && workspaceId) {
-      try {
-        return await supabaseDataService.createProduct(workspaceId, product);
-      } catch (e) {
-        console.warn('Fallback a persistencia local por error en Supabase:', e);
-      }
-    }
-    return mockDataService.create(product);
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.createProduct(wsId, product);
   }
 
-  async update(id: string, updates: Partial<Product>): Promise<Product> {
-    if (this.isLive) {
-      try {
-        return await supabaseDataService.updateProduct(id, updates);
-      } catch (e) {
-        console.warn('Fallback a persistencia local por error en Supabase:', e);
-      }
-    }
-    return mockDataService.update(id, updates);
+  async update(
+    id: string,
+    updates: Partial<Product>,
+    workspaceId?: string
+  ): Promise<Product> {
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.updateProduct(id, updates, wsId);
   }
 
-  async delete(id: string): Promise<boolean> {
-    if (this.isLive) {
-      try {
-        await supabaseDataService.deleteProduct(id);
-      } catch (e) {
-        console.warn('Fallback a eliminación local por error en Supabase:', e);
-      }
-    }
-    return mockDataService.delete(id);
+  async delete(id: string, workspaceId?: string): Promise<boolean> {
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.deleteProduct(id, wsId);
   }
 
-  async bulkDelete(ids: string[]): Promise<number> {
-    return mockDataService.bulkDelete(ids);
+  async bulkDelete(ids: string[], workspaceId?: string): Promise<number> {
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.bulkDeleteProducts(ids, wsId);
   }
 
-  async bulkUpdateStatus(ids: string[], active: boolean): Promise<number> {
-    return mockDataService.bulkUpdateStatus(ids, active);
+  async bulkUpdateStatus(ids: string[], active: boolean, workspaceId?: string): Promise<number> {
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.bulkUpdateProductStatus(ids, active, wsId);
   }
 
-  async bulkUpdateCategory(ids: string[], categoryId: string, categoryName: string): Promise<number> {
-    return mockDataService.bulkUpdateCategory(ids, categoryId, categoryName);
+  async bulkUpdateCategory(
+    ids: string[],
+    categoryId: string,
+    categoryName: string,
+    workspaceId?: string
+  ): Promise<number> {
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.bulkUpdateProductCategory(ids, categoryId, categoryName, wsId);
   }
 
   // --- CATEGORÍAS ---
 
   async getCategories(workspaceId?: string): Promise<Category[]> {
-    if (this.isLive && workspaceId) {
-      try {
-        const cats = await supabaseDataService.getCategories(workspaceId);
-        if (cats.length > 0) return cats;
-      } catch (e) {
-        console.warn('Fallback a categorías locales:', e);
-      }
-    }
-    return mockDataService.getCategories();
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.getCategories(wsId);
   }
 
   async createCategory(name: string, workspaceId?: string): Promise<Category> {
-    if (this.isLive && workspaceId) {
-      try {
-        return await supabaseDataService.createCategory(workspaceId, name);
-      } catch (e) {
-        console.warn('Fallback a categoría local:', e);
-      }
-    }
-    return mockDataService.createCategory(name);
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.createCategory(wsId, name);
   }
 
   // --- IMPORTACIONES CSV ---
@@ -134,126 +153,128 @@ export class UnifiedDataService {
     rows: ParsedCSVRow[],
     options: ImportOptions,
     fileName: string,
+    workspaceId?: string,
     onProgress?: (percent: number, current: number, total: number) => void
   ): Promise<ImportRecord> {
-    return mockDataService.importProducts(rows, options, fileName, onProgress);
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.importProducts(wsId, rows, options, fileName, onProgress);
   }
 
-  async associateImages(candidates: CandidateImage[]): Promise<{ matched: number; updated: number }> {
-    return mockDataService.associateImages(candidates);
+  async getHistory(workspaceId?: string): Promise<ImportRecord[]> {
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.getImportHistory(wsId);
   }
 
-  async getHistory(): Promise<ImportRecord[]> {
-    return mockDataService.getHistory();
+  async associateImages(
+    candidates: CandidateImage[],
+    workspaceId?: string
+  ): Promise<{ matched: number; updated: number }> {
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.associateImages(wsId, candidates);
   }
 
   // --- CATÁLOGOS ---
 
   async getCatalogs(workspaceId?: string): Promise<Catalog[]> {
-    if (this.isLive && workspaceId) {
-      try {
-        const cats = await supabaseDataService.getCatalogs(workspaceId);
-        if (cats.length > 0) return cats;
-      } catch (e) {
-        console.warn('Fallback a catálogos locales:', e);
-      }
-    }
-    return mockDataService.getCatalogs();
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.getCatalogs(wsId);
   }
 
-  async getCatalogById(id: string): Promise<Catalog | undefined> {
-    return mockDataService.getCatalogById(id);
+  async getCatalogById(id: string, workspaceId?: string): Promise<Catalog | undefined> {
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.getCatalogById(id, wsId);
   }
 
-  /**
-   * Consulta pública de revista virtual por token o slug
-   * Solo retorna catálogos en estado 'published'.
-   */
   async getByShareToken(tokenOrSlug: string): Promise<Catalog | undefined> {
-    if (this.isLive) {
-      try {
-        const found = await supabaseDataService.getByShareToken(tokenOrSlug);
-        if (found) return found;
-      } catch (e) {
-        console.warn('Fallback a consulta local de shareToken:', e);
-      }
+    this.checkConfigured();
+    return firebaseDataService.getByShareToken(tokenOrSlug);
+  }
+
+  async getPublishedCatalogs(workspaceId?: string): Promise<Catalog[]> {
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.getPublishedCatalogs(wsId);
+  }
+
+  async createCatalog(
+    catalog: Omit<Catalog, 'id' | 'createdAt' | 'updatedAt'>,
+    workspaceId?: string
+  ): Promise<Catalog> {
+    const wsId = this.requireWorkspace(catalog.workspaceId || workspaceId);
+    return firebaseDataService.createCatalog(wsId, catalog);
+  }
+
+  async updateCatalog(
+    id: string,
+    updates: Partial<Catalog>,
+    workspaceId?: string
+  ): Promise<Catalog> {
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.updateCatalog(id, updates, wsId);
+  }
+
+  async duplicateCatalog(id: string, workspaceId?: string): Promise<Catalog> {
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.duplicateCatalog(id, wsId);
+  }
+
+  async deleteCatalog(id: string, workspaceId?: string): Promise<boolean> {
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.deleteCatalog(id, wsId);
+  }
+
+  async publishCatalog(
+    id: string,
+    publishedData?: Catalog,
+    workspaceId?: string
+  ): Promise<Catalog> {
+    const wsId = this.requireWorkspace(publishedData?.workspaceId || workspaceId);
+    let catalog = publishedData;
+    if (!catalog) {
+      catalog = await this.getCatalogById(id, wsId);
     }
-    return mockDataService.getByShareToken(tokenOrSlug);
+    if (!catalog) {
+      throw new CloudOperationError('persistence_error', 'Catálogo no encontrado para publicar.');
+    }
+    return firebaseDataService.publishCatalog(id, catalog, wsId);
   }
 
-  async getPublishedCatalogs(): Promise<Catalog[]> {
-    return mockDataService.getPublishedCatalogs();
-  }
-
-  async createCatalog(catalog: Omit<Catalog, 'id' | 'createdAt' | 'updatedAt'>): Promise<Catalog> {
-    return mockDataService.createCatalog(catalog);
-  }
-
-  async updateCatalog(id: string, updates: Partial<Catalog>): Promise<Catalog> {
-    return mockDataService.updateCatalog(id, updates);
-  }
-
-  async duplicateCatalog(id: string): Promise<Catalog> {
-    return mockDataService.duplicateCatalog(id);
-  }
-
-  async deleteCatalog(id: string): Promise<boolean> {
-    return mockDataService.deleteCatalog(id);
-  }
-
-  async publishCatalog(id: string): Promise<Catalog> {
-    return mockDataService.publishCatalog(id);
-  }
-
-  async unpublishCatalog(id: string): Promise<Catalog> {
-    return mockDataService.unpublishCatalog(id);
+  async unpublishCatalog(id: string, workspaceId?: string): Promise<boolean> {
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.unpublishCatalog(id, wsId);
   }
 
   // --- PEDIDOS ---
 
   async getOrders(workspaceId?: string): Promise<Order[]> {
-    if (this.isLive && workspaceId) {
-      try {
-        const ords = await supabaseDataService.getOrders(workspaceId);
-        if (ords.length > 0) return ords;
-      } catch (e) {
-        console.warn('Fallback a pedidos locales:', e);
-      }
-    }
-    return mockDataService.getOrders();
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.getOrders(wsId);
   }
 
-  async getOrderById(id: string): Promise<Order | undefined> {
-    return mockDataService.getOrderById(id);
+  async getOrderById(id: string, workspaceId?: string): Promise<Order | undefined> {
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.getOrderById(id, wsId);
   }
 
   async createOrder(
     order: Omit<Order, 'id' | 'orderNumber' | 'createdAt'>,
     workspaceId?: string
   ): Promise<Order> {
-    if (this.isLive && workspaceId) {
-      try {
-        return await supabaseDataService.createOrder(order, workspaceId);
-      } catch (e) {
-        console.warn('Fallback a creación local de orden:', e);
-      }
-    }
-    return mockDataService.createOrder(order);
+    const wsId = this.requireWorkspace(order.workspaceId || workspaceId);
+    return firebaseDataService.createOrder(order, wsId);
   }
 
-  async updateOrderStatus(id: string, status: OrderStatus): Promise<Order> {
-    if (this.isLive) {
-      try {
-        await supabaseDataService.updateOrderStatus(id, status);
-      } catch (e) {
-        console.warn('Fallback a actualización local de orden:', e);
-      }
-    }
-    return mockDataService.updateOrderStatus(id, status);
+  async updateOrderStatus(
+    id: string,
+    status: OrderStatus,
+    workspaceId?: string
+  ): Promise<boolean> {
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.updateOrderStatus(id, status, wsId);
   }
 
-  async deleteOrder(id: string): Promise<boolean> {
-    return mockDataService.deleteOrder(id);
+  async deleteOrder(id: string, workspaceId?: string): Promise<boolean> {
+    const wsId = this.requireWorkspace(workspaceId);
+    return firebaseDataService.deleteOrder(id, wsId);
   }
 }
 

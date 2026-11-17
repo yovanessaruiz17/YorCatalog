@@ -1,0 +1,252 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Perfil privado de usuario autenticado con aislamiento PII.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 254 },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "avatarUrl": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "email", "fullName", "createdAt", "updatedAt"]
+    },
+    "Workspace": {
+      "title": "Workspace",
+      "description": "Espacio de trabajo comercial multi-tenant de un negocio.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "slug": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tagline": { "type": "string", "maxLength": 240 },
+        "logoUrl": { "type": "string", "maxLength": 1000 },
+        "whatsappNumber": { "type": "string", "maxLength": 32 },
+        "contactEmail": { "type": "string", "maxLength": 254 },
+        "currency": { "type": "string", "enum": ["COP", "USD", "EUR", "MXN"] },
+        "language": { "type": "string", "enum": ["es", "en"] },
+        "theme": { "type": "string", "enum": ["light", "dark", "system"] },
+        "settingsJson": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerId", "name", "slug", "whatsappNumber", "currency", "language", "theme", "createdAt", "updatedAt"]
+    },
+    "WorkspaceMember": {
+      "title": "WorkspaceMember",
+      "description": "Membresía y rol de usuario dentro de un workspace comercial.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "role": { "type": "string", "enum": ["owner", "admin", "member"] },
+        "email": { "type": "string", "maxLength": 254 },
+        "fullName": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "workspaceId", "userId", "role", "createdAt", "updatedAt"]
+    },
+    "Category": {
+      "title": "Category",
+      "description": "Categoría de inventario perteneciente a un workspace.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 400 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "workspaceId", "ownerId", "name", "createdAt", "updatedAt"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Producto del inventario maestro de un workspace.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "sku": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "ean": { "type": "string", "maxLength": 32 },
+        "categoryId": { "type": "string", "maxLength": 128 },
+        "categoryName": { "type": "string", "maxLength": 100 },
+        "brand": { "type": "string", "maxLength": 100 },
+        "price": { "type": "number" },
+        "compareAtPrice": { "type": "number" },
+        "currency": { "type": "string", "enum": ["COP", "USD", "EUR", "MXN"] },
+        "imageUrl": { "type": "string", "maxLength": 1500 },
+        "imageVerified": { "type": "boolean" },
+        "imageMatchStatus": { "type": "string", "enum": ["exact_match", "pending_review", "no_image", "invalid_image", "confirmed"] },
+        "additionalImages": { "type": "array" },
+        "stock": { "type": "number" },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "workspaceId", "ownerId", "name", "sku", "price", "currency", "active", "createdAt", "updatedAt"]
+    },
+    "ImportJob": {
+      "title": "ImportJob",
+      "description": "Registro inmutable de auditoría de importación CSV.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fileName": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "totalRows": { "type": "number" },
+        "importedCount": { "type": "number" },
+        "updatedCount": { "type": "number" },
+        "skippedCount": { "type": "number" },
+        "duplicatesCount": { "type": "number" },
+        "errorsCount": { "type": "number" },
+        "status": { "type": "string", "enum": ["completed", "failed", "pending"] },
+        "conflictResolution": { "type": "string", "enum": ["update_existing", "skip_existing", "create_new_sku"] },
+        "errorLog": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "workspaceId", "ownerId", "fileName", "totalRows", "importedCount", "updatedCount", "skippedCount", "duplicatesCount", "errorsCount", "status", "createdAt"]
+    },
+    "Catalog": {
+      "title": "Catalog",
+      "description": "Catálogo comercial editable por el workspace.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "internalName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "subtitle": { "type": "string", "maxLength": 240 },
+        "slug": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "shareToken": { "type": "string", "minLength": 3, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "description": { "type": "string", "maxLength": 2000 },
+        "status": { "type": "string", "enum": ["draft", "published", "archived"] },
+        "version": { "type": "number" },
+        "itemsCount": { "type": "number" },
+        "coverImage": { "type": "string", "maxLength": 1500 },
+        "logoUrl": { "type": "string", "maxLength": 1500 },
+        "templateId": { "type": "string", "enum": ["minimal", "editorial", "promotional", "category_grid"] },
+        "visualSettings": { "type": "object" },
+        "products": { "type": "array" },
+        "publishedAt": { "type": "string", "format": "date-time" },
+        "publishedUrl": { "type": "string", "maxLength": 1000 },
+        "publishedSnapshot": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "workspaceId", "ownerId", "internalName", "title", "slug", "shareToken", "status", "version", "itemsCount", "templateId", "visualSettings", "products", "createdAt", "updatedAt"]
+    },
+    "PublishedCatalog": {
+      "title": "PublishedCatalog",
+      "description": "Snapshot público inmutable accesible únicamente por token único (sin list ni PII).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 3, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "catalogId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "businessName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "whatsappNumber": { "type": "string", "maxLength": 32 },
+        "currency": { "type": "string", "enum": ["COP", "USD", "EUR", "MXN"] },
+        "language": { "type": "string", "enum": ["es", "en"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "subtitle": { "type": "string", "maxLength": 240 },
+        "slug": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "shareToken": { "type": "string", "minLength": 3, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "description": { "type": "string", "maxLength": 2000 },
+        "status": { "type": "string", "enum": ["draft", "published", "archived"] },
+        "version": { "type": "number" },
+        "itemsCount": { "type": "number" },
+        "coverImage": { "type": "string", "maxLength": 1500 },
+        "logoUrl": { "type": "string", "maxLength": 1500 },
+        "templateId": { "type": "string", "enum": ["minimal", "editorial", "promotional", "category_grid"] },
+        "visualSettings": { "type": "object" },
+        "products": { "type": "array" },
+        "publishedAt": { "type": "string", "format": "date-time" },
+        "publishedUrl": { "type": "string", "maxLength": 1000 },
+        "publishedSnapshot": { "type": "object" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "catalogId", "workspaceId", "ownerId", "businessName", "whatsappNumber", "currency", "language", "title", "slug", "shareToken", "status", "version", "itemsCount", "templateId", "visualSettings", "products", "updatedAt"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Pedido registrado desde revista pública o backoffice con aislamiento de PII.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orderNumber": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "catalogId": { "type": "string", "maxLength": 128 },
+        "catalogShareToken": { "type": "string", "maxLength": 128 },
+        "catalogTitle": { "type": "string", "maxLength": 160 },
+        "catalogVersion": { "type": "number" },
+        "customerName": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "customerPhone": { "type": "string", "maxLength": 40 },
+        "customerCity": { "type": "string", "maxLength": 100 },
+        "customerAddress": { "type": "string", "maxLength": 300 },
+        "notes": { "type": "string", "maxLength": 1000 },
+        "items": { "type": "array" },
+        "itemsCount": { "type": "number" },
+        "totalAmount": { "type": "number" },
+        "currency": { "type": "string", "enum": ["COP", "USD", "EUR", "MXN"] },
+        "status": { "type": "string", "enum": ["whatsapp_opened", "pending_whatsapp", "prepared", "confirmed", "cancelled"] },
+        "whatsappUrl": { "type": "string", "maxLength": 4000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "workspaceId", "ownerId", "orderNumber", "customerName", "items", "itemsCount", "totalAmount", "currency", "status", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Perfiles privados de usuario accesibles únicamente por el titular autenticado."
+    },
+    "/workspaces/{workspaceId}": {
+      "schema": { "$ref": "#/entities/Workspace" },
+      "description": "Configuración comercial y metadatos de cada negocio multi-tenant."
+    },
+    "/workspaces/{workspaceId}/members/{memberId}": {
+      "schema": { "$ref": "#/entities/WorkspaceMember" },
+      "description": "Membresías activas del workspace para verificación de acceso."
+    },
+    "/workspaces/{workspaceId}/categories/{categoryId}": {
+      "schema": { "$ref": "#/entities/Category" },
+      "description": "Categorías de productos aisladas por workspace."
+    },
+    "/workspaces/{workspaceId}/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Inventario maestro de productos aislado por workspace."
+    },
+    "/workspaces/{workspaceId}/importJobs/{importId}": {
+      "schema": { "$ref": "#/entities/ImportJob" },
+      "description": "Historial de auditoría de importaciones CSV por workspace."
+    },
+    "/workspaces/{workspaceId}/catalogs/{catalogId}": {
+      "schema": { "$ref": "#/entities/Catalog" },
+      "description": "Catálogos editables (borradores y publicados) del workspace."
+    },
+    "/workspaces/{workspaceId}/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/Order" },
+      "description": "Pedidos recibidos vía WhatsApp desde las revistas virtuales."
+    },
+    "/publishedCatalogs/{shareToken}": {
+      "schema": { "$ref": "#/entities/PublishedCatalog" },
+      "description": "Snapshots públicos accesibles solo por token único (sin listado ni PII privada)."
+    }
+  }
+}

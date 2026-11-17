@@ -118,7 +118,7 @@ export const translations = {
       rule1: 'La coincidencia por EAN no asume veracidad automática; requiere verificación humana.',
       rule2: 'Soporte para carga individual o por lote de archivos nombrados con el EAN.',
       rule3: 'Interfaz de verificación visual lado a lado con opción de corrección inmediata.',
-      rule4: 'Compatibilidad con imágenes locales y almacenamiento en la nube (Supabase Storage).',
+      rule4: 'Compatibilidad con almacenamiento seguro en la nube (Firebase Storage).',
     },
     catalogs: {
       title: 'Diseñador de Catálogos',
@@ -296,7 +296,7 @@ export const translations = {
       rule1: 'EAN barcode matches require human verification before publishing.',
       rule2: 'Support for single or batch upload of EAN-named images.',
       rule3: 'Side-by-side visual inspection interface with immediate override.',
-      rule4: 'Compatible with local assets and cloud storage (Supabase Storage).',
+      rule4: 'Compatible with cloud object storage (Firebase Storage).',
     },
     catalogs: {
       title: 'Catalog Designer',

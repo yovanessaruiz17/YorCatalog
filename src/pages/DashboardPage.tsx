@@ -20,37 +20,58 @@ import {
   AlertCircle,
   Database,
 } from 'lucide-react';
-import { mockDataService } from '../services/mockDataService';
+import { dataService } from '../services/dataService';
+import { formatCloudErrorForUser } from '../services/firebaseClient';
+import { QueryStateAlert, QueryErrorState } from '../components/common/QueryStateAlert';
+import { useAuth } from '../context/AuthContext';
 import { Product, Catalog, Order, ImportRecord } from '../types';
 import { useSettings } from '../context/SettingsContext';
 
 export const DashboardPage: React.FC = () => {
   const { t, formatPrice, formatDate } = useSettings();
+  const { currentWorkspace } = useAuth();
   const [products, setProducts] = useState<Product[]>([]);
   const [catalogs, setCatalogs] = useState<Catalog[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [imports, setImports] = useState<ImportRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [queryError, setQueryError] = useState<QueryErrorState | null>(null);
+
+  const loadData = async () => {
+    const wsId = currentWorkspace?.id;
+    setProducts([]);
+    setCatalogs([]);
+    setOrders([]);
+    setImports([]);
+    setQueryError(null);
+
+    if (!wsId) {
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const [p, c, o, i] = await Promise.all([
+        dataService.getAll(wsId),
+        dataService.getCatalogs(wsId),
+        dataService.getOrders(wsId),
+        dataService.getHistory(wsId),
+      ]);
+      setProducts(p);
+      setCatalogs(c);
+      setOrders(o);
+      setImports(i);
+    } catch (err) {
+      setQueryError(formatCloudErrorForUser(err, 'No fue posible cargar el resumen del workspace.'));
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    async function loadData() {
-      try {
-        const [p, c, o, i] = await Promise.all([
-          mockDataService.getAll(),
-          mockDataService.getCatalogs(),
-          mockDataService.getOrders(),
-          mockDataService.getHistory(),
-        ]);
-        setProducts(p);
-        setCatalogs(c);
-        setOrders(o);
-        setImports(i);
-      } finally {
-        setLoading(false);
-      }
-    }
-    loadData();
-  }, []);
+    void loadData();
+  }, [currentWorkspace?.id]);
 
   const pendingImagesCount = products.filter((p) => !p.imageUrl || !p.imageVerified).length;
   const publishedCatalogs = catalogs.filter((c) => c.status === 'published');
@@ -77,14 +98,19 @@ export const DashboardPage: React.FC = () => {
           </p>
         </div>
 
-        {/* Demo Adapter Alert Badge */}
-        <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs text-slate-600 dark:text-slate-400">
+        {/* Cloud-Only Workspace Badge */}
+        <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 rounded-xl text-xs text-emerald-800 dark:text-emerald-300">
           <Database className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-          <span className="font-medium">{t.common.demoMode}</span>
+          <span className="font-medium">
+            {currentWorkspace ? `${currentWorkspace.name} • Cloud Firestore` : 'Cloud-Only Firebase'}
+          </span>
         </div>
       </div>
 
-      {/* Quick Action Tiles */}
+      {queryError ? (
+        <QueryStateAlert error={queryError} onRetry={() => void loadData()} />
+      ) : (
+        <>
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <Link
           to="/import"
@@ -336,11 +362,13 @@ export const DashboardPage: React.FC = () => {
           <div className="mt-4 p-3 bg-slate-100/70 dark:bg-slate-800/40 rounded-xl border border-slate-200/60 dark:border-slate-800 flex items-start gap-2.5 text-xs text-slate-600 dark:text-slate-400">
             <AlertCircle className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
             <span>
-              En la <strong>Fase 2</strong>, este módulo procesará archivos CSV reales con mapeo visual, deduplicación y preservación de ceros en EAN.
+              Datos comerciales sincronizados exclusivamente en <strong>Cloud Firestore</strong> por workspace.
             </span>
           </div>
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 };

@@ -14,8 +14,8 @@
  * - Pantalla de catálogo despublicado o no encontrado con canal directo de contacto.
  */
 
-import React, { useEffect, useState, useMemo } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import React, { useCallback, useEffect, useState, useMemo } from 'react';
+import { useParams } from 'react-router-dom';
 import {
   BookOpen,
   Search,
@@ -37,38 +37,40 @@ import {
   MapPin,
   User,
   Info,
-  Layers,
   ArrowRight,
-  ExternalLink,
-  Filter,
-  ArrowUpDown,
   CheckCircle2,
-  Share2,
+  Loader2,
 } from 'lucide-react';
 import { useSettings } from '../context/SettingsContext';
-import { mockDataService } from '../services/mockDataService';
+import { dataService } from '../services/dataService';
+import { formatCloudErrorForUser } from '../services/firebaseClient';
 import { downloadCatalogPdfFile } from '../services/pdfGenerator';
 import {
   buildWhatsAppOrderMessage,
   generateWhatsAppUrl,
   isWhatsAppMessageLong,
+  normalizeWhatsAppNumber,
 } from '../services/whatsappOrderService';
+import { QueryStateAlert, QueryErrorState } from '../components/common/QueryStateAlert';
+import { formatCurrency } from '../utils/formatters';
 import {
   Catalog,
   Product,
   CartItem,
   CustomerCheckoutData,
-  Order,
+  SupportedCurrency,
+  SupportedLanguage,
 } from '../types';
 
 export const PublicMagazinePage: React.FC = () => {
   const { shareToken } = useParams<{ shareToken: string }>();
-  const { settings, formatPrice, isDark } = useSettings();
+  const { settings } = useSettings();
 
   // Estados del Catálogo
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  const [queryError, setQueryError] = useState<QueryErrorState | null>(null);
 
   // Estados de Navegación, Filtros y Ordenación
   const [searchTerm, setSearchTerm] = useState('');
@@ -78,7 +80,7 @@ export const PublicMagazinePage: React.FC = () => {
   const [viewMode, setViewMode] = useState<'grid' | 'spread'>('grid');
   const [spreadPageIndex, setSpreadPageIndex] = useState(0);
 
-  // Estados del Carrito
+  // Estados del Carrito (strictly React in-memory session state, no browser storage)
   const [cart, setCart] = useState<CartItem[]>([]);
   const [isCartOpen, setIsCartOpen] = useState(false);
   const [showClearCartConfirm, setShowClearCartConfirm] = useState(false);
@@ -101,16 +103,25 @@ export const PublicMagazinePage: React.FC = () => {
   const [isOrderSubmitted, setIsOrderSubmitted] = useState(false);
   const [lastOrderNumber, setLastOrderNumber] = useState('');
   const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
+  const [orderSubmitError, setOrderSubmitError] = useState<string | null>(null);
 
   // Exportación a PDF desde vista pública
   const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [pdfProgress, setPdfProgress] = useState(0);
+  const [pdfError, setPdfError] = useState<string | null>(null);
 
-  // 1. Cargar el catálogo publicado mediante shareToken
-  useEffect(() => {
-    let isMounted = true;
+  // 1. Cargar el catálogo publicado mediante shareToken desde Cloud Firestore
+  const loadCatalog = useCallback(async () => {
     setLoading(true);
     setNotFound(false);
+    setQueryError(null);
+    setCatalog(null);
+    setCart([]);
+    setIsOrderSubmitted(false);
+    setLastOrderNumber('');
+    setOrderSubmitError(null);
+    setIsWhatsAppModalOpen(false);
+    setPdfError(null);
 
     if (!shareToken) {
       setNotFound(true);
@@ -118,41 +129,28 @@ export const PublicMagazinePage: React.FC = () => {
       return;
     }
 
-    mockDataService.getByShareToken(shareToken).then((found) => {
-      if (!isMounted) return;
+    try {
+      const found = await dataService.getByShareToken(shareToken);
       if (found && found.status === 'published') {
         setCatalog(found);
-
-        // Cargar carrito persistido para este catálogo específico
-        try {
-          const savedCart = sessionStorage.getItem(`yor_cart_${found.id}`);
-          if (savedCart) {
-            setCart(JSON.parse(savedCart));
-          }
-        } catch {
-          // ignore storage parse errors
-        }
       } else {
         setNotFound(true);
       }
+    } catch (err) {
+      setQueryError(
+        formatCloudErrorForUser(
+          err,
+          'No se pudo cargar la revista pública desde Firebase Cloud Firestore.'
+        )
+      );
+    } finally {
       setLoading(false);
-    });
-
-    return () => {
-      isMounted = false;
-    };
+    }
   }, [shareToken]);
 
-  // Persistir carrito en sessionStorage cuando cambia
   useEffect(() => {
-    if (catalog?.id) {
-      try {
-        sessionStorage.setItem(`yor_cart_${catalog.id}`, JSON.stringify(cart));
-      } catch {
-        // ignore
-      }
-    }
-  }, [cart, catalog?.id]);
+    void loadCatalog();
+  }, [loadCatalog]);
 
   // Obtener lista de productos desde el snapshot publicado (inmutable)
   const products: Product[] = useMemo(() => {
@@ -247,9 +245,16 @@ export const PublicMagazinePage: React.FC = () => {
     };
   }, [catalog]);
 
-  // Manejadores del Carrito con validación estricta
+  // Manejadores del Carrito con validación estricta (reinician confirmación previa si cambia el pedido)
+  const resetOrderSubmissionState = () => {
+    setIsOrderSubmitted(false);
+    setLastOrderNumber('');
+    setOrderSubmitError(null);
+  };
+
   const handleAddToCart = (product: Product, quantity = 1) => {
     const validQty = Math.max(1, Math.floor(quantity));
+    resetOrderSubmissionState();
     setCart((prev) => {
       const existingIdx = prev.findIndex((it) => it.productId === product.id);
       if (existingIdx > -1) {
@@ -269,7 +274,7 @@ export const PublicMagazinePage: React.FC = () => {
           compareAtPrice: product.compareAtPrice,
           quantity: validQty,
           imageUrl: product.imageUrl,
-          currency: product.currency || 'COP',
+          currency: catalog?.currency || product.currency || 'COP',
           categoryName: product.categoryName,
         };
         return [...prev, newItem];
@@ -278,6 +283,7 @@ export const PublicMagazinePage: React.FC = () => {
   };
 
   const handleUpdateQuantity = (productId: string, delta: number) => {
+    resetOrderSubmissionState();
     setCart((prev) => {
       return prev
         .map((it) => {
@@ -292,13 +298,28 @@ export const PublicMagazinePage: React.FC = () => {
   };
 
   const handleRemoveItem = (productId: string) => {
+    resetOrderSubmissionState();
     setCart((prev) => prev.filter((it) => it.productId !== productId));
   };
 
   const handleClearCart = () => {
+    resetOrderSubmissionState();
     setCart([]);
     setShowClearCartConfirm(false);
   };
+
+  // Identidad comercial pública resuelta desde el snapshot publicado (sin depender de sesión admin)
+  const publicBusinessName = catalog?.businessName || settings.businessName || 'YorCatalog';
+  const publicWhatsappNumber = catalog?.whatsappNumber || settings.whatsappNumber || '';
+  const publicCurrency = (catalog?.currency || cart[0]?.currency || settings.currency || 'COP') as SupportedCurrency;
+  const publicLanguage = (catalog?.language || settings.language || 'es') as SupportedLanguage;
+  const cleanWhatsAppPhone = useMemo(
+    () => normalizeWhatsAppNumber(publicWhatsappNumber),
+    [publicWhatsappNumber]
+  );
+
+  const formatPublicPrice = (amount: number) =>
+    formatCurrency(amount, publicCurrency, publicLanguage);
 
   // Mensaje estructurado de WhatsApp
   const whatsAppMessage = useMemo(() => {
@@ -307,16 +328,13 @@ export const PublicMagazinePage: React.FC = () => {
       catalog,
       items: cart,
       customer,
-      businessName: settings.businessName || 'YORCATALOG',
+      businessName: publicBusinessName,
     });
-  }, [catalog, cart, customer, settings.businessName]);
+  }, [catalog, cart, customer, publicBusinessName]);
 
   const whatsAppUrl = useMemo(() => {
-    return generateWhatsAppUrl(
-      settings.whatsappNumber || '573001234567',
-      whatsAppMessage
-    );
-  }, [settings.whatsappNumber, whatsAppMessage]);
+    return generateWhatsAppUrl(publicWhatsappNumber, whatsAppMessage);
+  }, [publicWhatsappNumber, whatsAppMessage]);
 
   const isMsgLong = useMemo(() => isWhatsAppMessageLong(whatsAppMessage), [whatsAppMessage]);
 
@@ -333,51 +351,66 @@ export const PublicMagazinePage: React.FC = () => {
       return;
     }
     setFormErrors({});
+    setOrderSubmitError(null);
     setIsWhatsAppModalOpen(true);
   };
 
-  // Abrir WhatsApp y Registrar Pedido Inmutable con estado 'whatsapp_opened'
+  // Registrar Pedido Inmutable en Firestore ANTES de habilitar el envío por WhatsApp
   const handleConfirmAndOpenWhatsApp = async () => {
     if (!catalog) return;
     if (!customer.name.trim()) {
       setFormErrors({ name: 'Por favor ingresa tu nombre completo.' });
       return;
     }
+    if (cart.length === 0) {
+      setOrderSubmitError('Tu carrito está vacío. Agrega al menos un producto antes de confirmar.');
+      return;
+    }
 
     setIsSubmittingOrder(true);
+    setOrderSubmitError(null);
     try {
-      // Registrar el pedido formalmente con estado 'whatsapp_opened' (sin asumir confirmación)
-      const newOrder = await mockDataService.createOrder({
-        catalogId: catalog.id,
-        catalogTitle: catalog.title,
-        catalogVersion: catalog.version,
-        customerName: customer.name.trim(),
-        customerPhone: customer.phone?.trim() || undefined,
-        customerCity: customer.city?.trim() || undefined,
-        customerAddress: customer.address?.trim() || undefined,
-        items: cart.map((it) => ({
-          productId: it.productId,
-          sku: it.sku,
-          ean: it.ean,
-          name: it.name,
-          price: it.price,
-          compareAtPrice: it.compareAtPrice,
-          quantity: it.quantity,
-          subtotal: it.price * it.quantity,
-          imageUrl: it.imageUrl,
-        })),
-        itemsCount: totalCartCount,
-        totalAmount: totalCartAmount,
-        currency: cart[0]?.currency || 'COP',
-        status: 'whatsapp_opened',
-        notes: customer.notes?.trim() || undefined,
-        whatsappUrl: whatsAppUrl,
-      });
+      const newOrder = await dataService.createOrder(
+        {
+          catalogId: catalog.id,
+          catalogShareToken: catalog.shareToken || shareToken,
+          ownerId: catalog.ownerId,
+          catalogTitle: catalog.title,
+          catalogVersion: catalog.version,
+          customerName: customer.name.trim(),
+          customerPhone: customer.phone?.trim() || undefined,
+          customerCity: customer.city?.trim() || undefined,
+          customerAddress: customer.address?.trim() || undefined,
+          items: cart.map((it) => ({
+            productId: it.productId,
+            sku: it.sku,
+            ean: it.ean,
+            name: it.name,
+            price: it.price,
+            compareAtPrice: it.compareAtPrice,
+            quantity: it.quantity,
+            subtotal: it.price * it.quantity,
+            imageUrl: it.imageUrl,
+          })),
+          itemsCount: totalCartCount,
+          totalAmount: totalCartAmount,
+          currency: publicCurrency,
+          status: 'whatsapp_opened',
+          notes: customer.notes?.trim() || undefined,
+          whatsappUrl: whatsAppUrl,
+        },
+        catalog.workspaceId
+      );
 
       setLastOrderNumber(newOrder.orderNumber);
       setIsOrderSubmitted(true);
     } catch (err) {
-      console.error('Error al registrar pedido para WhatsApp:', err);
+      setOrderSubmitError(
+        formatCloudErrorForUser(
+          err,
+          'No se pudo registrar el pedido en Cloud Firestore. Tus productos y datos siguen intactos para reintentar.'
+        ).message
+      );
     } finally {
       setIsSubmittingOrder(false);
     }
@@ -388,15 +421,20 @@ export const PublicMagazinePage: React.FC = () => {
     if (!catalog) return;
     setIsExportingPdf(true);
     setPdfProgress(10);
+    setPdfError(null);
     try {
       await downloadCatalogPdfFile(
         catalog,
-        settings.businessName,
-        settings.whatsappNumber,
+        publicBusinessName,
+        publicWhatsappNumber,
         (p) => setPdfProgress(p)
       );
     } catch (err) {
-      console.error('Error generando PDF de la revista:', err);
+      setPdfError(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo generar el archivo PDF de esta publicación. Inténtalo nuevamente.'
+      );
     } finally {
       setIsExportingPdf(false);
       setPdfProgress(0);
@@ -414,19 +452,29 @@ export const PublicMagazinePage: React.FC = () => {
           Cargando Revista Virtual...
         </h2>
         <p className="text-xs text-slate-500 mt-1">
-          Verificando enlace oficial y versión publicada
+          Verificando enlace oficial y versión publicada en la nube
         </p>
+      </div>
+    );
+  }
+
+  // --- RENDER 1.5: ERROR DE CONEXIÓN / CONFIGURACIÓN CLOUD (Sin asumir catálogo inexistente) ---
+  if (queryError) {
+    return (
+      <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex flex-col items-center justify-center p-6 font-sans">
+        <div className="max-w-lg w-full">
+          <QueryStateAlert
+            error={queryError}
+            title="No pudimos conectar con la revista pública"
+            onRetry={() => void loadCatalog()}
+          />
+        </div>
       </div>
     );
   }
 
   // --- RENDER 2: CATÁLOGO NO ENCONTRADO O DESPUBLICADO ---
   if (notFound || !catalog) {
-    const cleanNumber = settings.whatsappNumber ? settings.whatsappNumber.replace(/[^0-9]/g, '') : '';
-    const contactMsg = encodeURIComponent(
-      'Hola, intenté consultar su catálogo en línea pero figura temporalmente no disponible. ¿Podrían compartirme información actualizada de sus productos?'
-    );
-
     return (
       <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex flex-col items-center justify-center p-6 text-center font-sans">
         <div className="max-w-md w-full p-8 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-xl space-y-5">
@@ -443,37 +491,9 @@ export const PublicMagazinePage: React.FC = () => {
             </p>
           </div>
 
-          <div className="p-4 bg-slate-50 dark:bg-slate-800/50 rounded-2xl border border-slate-100 dark:border-slate-800 text-xs text-left space-y-1">
-            <span className="font-semibold text-slate-700 dark:text-slate-300 block">
-              Comercio Emisor:
-            </span>
-            <p className="font-bold text-slate-900 dark:text-white">
-              {settings.businessName || 'YORCATALOG'}
-            </p>
-            {settings.whatsappNumber && (
-              <p className="text-slate-500 font-mono text-[11px]">
-                WhatsApp: {settings.whatsappNumber}
-              </p>
-            )}
-          </div>
-
-          <div className="pt-2">
-            {cleanNumber ? (
-              <a
-                href={`https://wa.me/${cleanNumber}?text=${contactMsg}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center justify-center gap-2 w-full py-3 px-4 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-xs transition"
-              >
-                <Send className="w-4 h-4" />
-                <span>Contactar al Comercio por WhatsApp</span>
-              </a>
-            ) : (
-              <p className="text-xs text-slate-400">
-                Consulta directamente con el comercio emisor para obtener el enlace actualizado.
-              </p>
-            )}
-          </div>
+          <p className="text-xs text-slate-400">
+            Solicita directamente al comercio emisor el nuevo enlace oficial de su revista virtual.
+          </p>
         </div>
       </div>
     );
@@ -490,7 +510,7 @@ export const PublicMagazinePage: React.FC = () => {
             {catalog.logoUrl || settings.logoUrl ? (
               <img
                 src={catalog.logoUrl || settings.logoUrl}
-                alt={settings.businessName}
+                alt={publicBusinessName}
                 className="w-10 h-10 object-contain rounded-xl border border-slate-200 dark:border-slate-700 p-1 bg-white"
               />
             ) : (
@@ -504,7 +524,7 @@ export const PublicMagazinePage: React.FC = () => {
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <span className="font-extrabold text-sm sm:text-base text-slate-900 dark:text-white truncate">
-                  {settings.businessName || 'YORCATALOG'}
+                  {publicBusinessName}
                 </span>
                 <span className="hidden sm:inline-flex items-center px-2 py-0.5 text-[9px] font-bold tracking-wide uppercase bg-emerald-100 dark:bg-emerald-950/90 text-emerald-800 dark:text-emerald-300 rounded-md">
                   Oficial v{catalog.version}.0
@@ -547,6 +567,27 @@ export const PublicMagazinePage: React.FC = () => {
           </div>
         </div>
       </header>
+
+      {pdfError && (
+        <div className="max-w-6xl mx-auto w-full px-4 sm:px-6 pt-4">
+          <div
+            role="alert"
+            className="p-3.5 bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-800 rounded-2xl flex items-center justify-between gap-3 text-xs text-rose-800 dark:text-rose-200"
+          >
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{pdfError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPdfError(null)}
+              className="p-1 hover:bg-rose-100 dark:hover:bg-rose-900 rounded-lg"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* 2. Banner de Portada Editorial del Catálogo */}
       <section className="relative overflow-hidden bg-slate-950 text-white border-b border-slate-800">
@@ -613,7 +654,7 @@ export const PublicMagazinePage: React.FC = () => {
               <div className="flex items-center justify-between text-xs pt-1 border-t border-white/10">
                 <span className="text-slate-300">Total de referencia:</span>
                 <span className="font-mono font-extrabold text-emerald-400 text-base">
-                  {formatPrice(totalCartAmount)}
+                  {formatPublicPrice(totalCartAmount)}
                 </span>
               </div>
             ) : (
@@ -864,11 +905,11 @@ export const PublicMagazinePage: React.FC = () => {
                         {visual.showPrices ? (
                           <div className="space-y-0.5">
                             <span className="text-base font-extrabold font-mono text-slate-900 dark:text-white">
-                              {formatPrice(prod.price)}
+                              {formatPublicPrice(prod.price)}
                             </span>
                             {hasDiscount && (
                               <span className="text-xs text-slate-400 line-through font-mono ml-2">
-                                {formatPrice(prod.compareAtPrice!)}
+                                {formatPublicPrice(prod.compareAtPrice!)}
                               </span>
                             )}
                           </div>
@@ -986,7 +1027,7 @@ export const PublicMagazinePage: React.FC = () => {
                     <div>
                       {visual.showPrices ? (
                         <span className="text-xl font-mono font-extrabold text-slate-900 dark:text-white">
-                          {formatPrice(prod.price)}
+                          {formatPublicPrice(prod.price)}
                         </span>
                       ) : (
                         <span className="text-xs font-semibold text-emerald-600">
@@ -1023,7 +1064,7 @@ export const PublicMagazinePage: React.FC = () => {
                 </span>
                 {visual.showPrices ? (
                   <span className="text-xs font-mono font-extrabold text-emerald-400">
-                    Total: {formatPrice(totalCartAmount)}
+                    Total: {formatPublicPrice(totalCartAmount)}
                   </span>
                 ) : (
                   <span className="text-xs text-slate-300 italic">
@@ -1101,7 +1142,7 @@ export const PublicMagazinePage: React.FC = () => {
                   <span className="text-[11px] text-slate-400 block">Precio:</span>
                   {visual.showPrices ? (
                     <span className="text-xl font-extrabold font-mono text-slate-900 dark:text-white">
-                      {formatPrice(selectedProduct.price)}
+                      {formatPublicPrice(selectedProduct.price)}
                     </span>
                   ) : (
                     <span className="text-xs font-semibold text-emerald-600">
@@ -1209,6 +1250,13 @@ export const PublicMagazinePage: React.FC = () => {
 
             {/* Contenido del Carrito */}
             <div className="flex-1 overflow-y-auto p-5 space-y-6">
+              <div className="p-3 bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-2xl flex items-start gap-2.5 text-[11px] text-slate-600 dark:text-slate-300">
+                <Info className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
+                <span>
+                  <strong>Carrito en memoria de sesión:</strong> tus productos se conservan mientras navegas esta revista. Si recargas la página, el carrito se reiniciará.
+                </span>
+              </div>
+
               {cart.length === 0 ? (
                 <div className="py-16 text-center space-y-3">
                   <ShoppingBag className="w-12 h-12 mx-auto text-slate-300 dark:text-slate-700 stroke-1" />
@@ -1251,7 +1299,7 @@ export const PublicMagazinePage: React.FC = () => {
                           </h4>
                           <div className="text-[10px] font-mono text-slate-400">
                             {visual.showPrices
-                              ? formatPrice(item.price)
+                              ? formatPublicPrice(item.price)
                               : 'A cotizar'}
                             {item.ean && ` • EAN: ${item.ean}`}
                           </div>
@@ -1279,7 +1327,7 @@ export const PublicMagazinePage: React.FC = () => {
                         <div className="text-right shrink-0">
                           {visual.showPrices && (
                             <span className="text-xs font-mono font-extrabold text-slate-900 dark:text-white block">
-                              {formatPrice(item.price * item.quantity)}
+                              {formatPublicPrice(item.price * item.quantity)}
                             </span>
                           )}
                           <button
@@ -1403,7 +1451,7 @@ export const PublicMagazinePage: React.FC = () => {
                     {visual.showPrices ? 'Total Liquidado:' : 'Estado de Precios:'}
                   </span>
                   <span className="text-lg font-mono font-black text-slate-900 dark:text-white">
-                    {visual.showPrices ? formatPrice(totalCartAmount) : 'A cotizar'}
+                    {visual.showPrices ? formatPublicPrice(totalCartAmount) : 'A cotizar'}
                   </span>
                 </div>
 
@@ -1453,8 +1501,12 @@ export const PublicMagazinePage: React.FC = () => {
               {/* Caja de previsualización del mensaje */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between text-xs text-slate-500">
-                  <span>Mensaje codificado para <strong>{settings.whatsappNumber}</strong>:</span>
+                  <span>
+                    Mensaje codificado para{' '}
+                    <strong>{publicWhatsappNumber || 'Sin número configurado'}</strong>:
+                  </span>
                   <button
+                    type="button"
                     onClick={handleCopyMessage}
                     className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600 hover:text-emerald-500"
                   >
@@ -1468,46 +1520,92 @@ export const PublicMagazinePage: React.FC = () => {
                 </pre>
               </div>
 
+              {!cleanWhatsAppPhone && (
+                <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-xl text-[11px] text-amber-800 dark:text-amber-200">
+                  Este comercio aún no configuró un número de WhatsApp receptor en su publicación. Aún puedes registrar el pedido en la nube y copiar el resumen del mensaje.
+                </div>
+              )}
+
               {isMsgLong && (
                 <p className="text-[11px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 p-2.5 rounded-xl border border-amber-200 dark:border-amber-800">
-                  ⚠️ Tu pedido contiene varios artículos. Si tu aplicación de WhatsApp recorta el mensaje por longitud, puedes usar el botón <strong>"Copiar texto"</strong> de arriba y pegarlo directamente en la conversación.
+                  Tu pedido contiene varios artículos. Si tu aplicación de WhatsApp recorta el mensaje por longitud, puedes usar el botón <strong>&quot;Copiar texto&quot;</strong> de arriba y pegarlo directamente en la conversación.
                 </p>
               )}
 
-              {/* Registro Inmutable Explicado */}
+              {orderSubmitError && (
+                <div
+                  role="alert"
+                  className="p-3.5 bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-800 rounded-2xl text-xs text-rose-800 dark:text-rose-200 flex items-start gap-2.5"
+                >
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>{orderSubmitError}</span>
+                </div>
+              )}
+
+              {/* Registro Inmutable Explicado (solo visible tras confirmación real en Cloud Firestore) */}
               {isOrderSubmitted && (
                 <div className="p-4 bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 rounded-2xl text-xs text-emerald-900 dark:text-emerald-200 space-y-1">
                   <div className="flex items-center gap-2 font-bold">
                     <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                    <span>Pedido Registrado: {lastOrderNumber}</span>
+                    <span>Pedido Registrado en Firestore: {lastOrderNumber}</span>
                   </div>
                   <p className="text-[11px] leading-relaxed">
-                    Se ha guardado una instantánea inmutable en el registro del comercio con estado <em>"Enlace WhatsApp abierto"</em>. Tu asesor comercial lo identificará con este código.
+                    Se ha guardado una instantánea inmutable en el registro del comercio con estado <em>&quot;Enlace WhatsApp abierto&quot;</em>. Ya puedes abrir WhatsApp para enviar el mensaje al comercio.
                   </p>
                 </div>
               )}
             </div>
 
-            {/* Footer con Acciones */}
+            {/* Footer con Acciones: paso 1 registra en Firestore, paso 2 habilita enlace a WhatsApp */}
             <div className="p-5 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 flex flex-col sm:flex-row items-center justify-between gap-3">
               <button
+                type="button"
+                disabled={isSubmittingOrder}
                 onClick={() => setIsWhatsAppModalOpen(false)}
-                className="w-full sm:w-auto px-4 py-2.5 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 rounded-xl transition"
+                className="w-full sm:w-auto px-4 py-2.5 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 rounded-xl transition disabled:opacity-50"
               >
                 Volver a Modificar Pedido
               </button>
 
-              {/* Botón directo de apertura wa.me sin popup-blockers */}
-              <a
-                href={whatsAppUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={handleConfirmAndOpenWhatsApp}
-                className="w-full sm:w-auto px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-xs flex items-center justify-center gap-2 transition"
-              >
-                <Send className="w-4 h-4" />
-                <span>Continuar y Abrir WhatsApp</span>
-              </a>
+              {!isOrderSubmitted ? (
+                <button
+                  type="button"
+                  onClick={() => void handleConfirmAndOpenWhatsApp()}
+                  disabled={isSubmittingOrder}
+                  className="w-full sm:w-auto px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-xs flex items-center justify-center gap-2 transition disabled:opacity-60"
+                >
+                  {isSubmittingOrder ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Registrando Pedido...</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-4 h-4" />
+                      <span>Registrar Pedido y Habilitar WhatsApp</span>
+                    </>
+                  )}
+                </button>
+              ) : cleanWhatsAppPhone ? (
+                <a
+                  href={whatsAppUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-full sm:w-auto px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-xs flex items-center justify-center gap-2 transition"
+                >
+                  <Send className="w-4 h-4" />
+                  <span>Abrir WhatsApp Ahora</span>
+                </a>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleCopyMessage}
+                  className="w-full sm:w-auto px-6 py-2.5 bg-slate-900 dark:bg-emerald-600 text-white text-xs font-bold rounded-xl shadow-xs flex items-center justify-center gap-2 transition"
+                >
+                  <Copy className="w-4 h-4" />
+                  <span>{copiedMessage ? 'Mensaje Copiado' : 'Copiar Pedido'}</span>
+                </button>
+              )}
             </div>
           </div>
         </div>

@@ -38,7 +38,10 @@ import {
   ChevronRight,
   Sparkles,
 } from 'lucide-react';
-import { mockDataService } from '../services/mockDataService';
+import { dataService } from '../services/dataService';
+import { formatCloudErrorForUser } from '../services/firebaseClient';
+import { QueryStateAlert, QueryErrorState } from '../components/common/QueryStateAlert';
+import { useAuth } from '../context/AuthContext';
 import { Category, ImageMatchStatus, Product } from '../types';
 import { useSettings } from '../context/SettingsContext';
 import { Link } from 'react-router-dom';
@@ -47,9 +50,12 @@ type SortOption = 'name_asc' | 'name_desc' | 'price_asc' | 'price_desc' | 'stock
 
 export const ProductsPage: React.FC = () => {
   const { t, formatPrice } = useSettings();
+  const { currentWorkspace } = useAuth();
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
+  const [queryError, setQueryError] = useState<QueryErrorState | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   // Search & Filter state
   const [search, setSearch] = useState('');
@@ -105,23 +111,43 @@ export const ProductsPage: React.FC = () => {
 
   const [formError, setFormError] = useState<string | null>(null);
 
-  useEffect(() => {
-    loadData();
-  }, []);
-
   const loadData = async () => {
+    const wsId = currentWorkspace?.id;
+    setProducts([]);
+    setCategories([]);
+    setSelectedProductIds(new Set());
+    setInspectProduct(null);
+    setEditingProduct(null);
+    setIsCreatingProduct(false);
+    setDeleteConfirmId(null);
+    setBulkDeleteConfirm(false);
+    setShowCategoryManager(false);
+    setQueryError(null);
+    setActionError(null);
+
+    if (!wsId) {
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     try {
       const [prods, cats] = await Promise.all([
-        mockDataService.getAll(),
-        mockDataService.getCategories(),
+        dataService.getAll(wsId),
+        dataService.getCategories(wsId),
       ]);
       setProducts(prods);
       setCategories(cats);
+    } catch (err) {
+      setQueryError(formatCloudErrorForUser(err, 'No se pudo cargar el inventario del workspace.'));
     } finally {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    void loadData();
+  }, [currentWorkspace?.id]);
 
   // Filtered and sorted products
   const filteredProducts = useMemo(() => {
@@ -207,31 +233,51 @@ export const ProductsPage: React.FC = () => {
   const handleBulkToggleActive = async (active: boolean) => {
     const ids = Array.from(selectedProductIds);
     if (ids.length === 0) return;
-    await mockDataService.bulkUpdateStatus(ids, active);
-    await loadData();
-    setSelectedProductIds(new Set());
+    setActionError(null);
+    try {
+      await dataService.bulkUpdateStatus(ids, active, currentWorkspace?.id);
+      await loadData();
+      setSelectedProductIds(new Set());
+    } catch (err) {
+      setActionError(formatCloudErrorForUser(err, 'Error al actualizar el estado masivo de productos.').message);
+    }
   };
 
   const handleBulkDeleteConfirm = async () => {
     const ids = Array.from(selectedProductIds);
     if (ids.length === 0) return;
-    await mockDataService.bulkDelete(ids);
-    setBulkDeleteConfirm(false);
-    setSelectedProductIds(new Set());
-    await loadData();
+    setActionError(null);
+    try {
+      await dataService.bulkDelete(ids, currentWorkspace?.id);
+      setBulkDeleteConfirm(false);
+      setSelectedProductIds(new Set());
+      await loadData();
+    } catch (err) {
+      setActionError(formatCloudErrorForUser(err, 'Error al eliminar productos seleccionados.').message);
+    }
   };
 
   // Single delete
   const handleDeleteProduct = async (id: string) => {
-    await mockDataService.delete(id);
-    setDeleteConfirmId(null);
-    await loadData();
+    setActionError(null);
+    try {
+      await dataService.delete(id, currentWorkspace?.id);
+      setDeleteConfirmId(null);
+      await loadData();
+    } catch (err) {
+      setActionError(formatCloudErrorForUser(err, 'No se pudo eliminar el producto.').message);
+    }
   };
 
   // Toggle active single
   const handleToggleActive = async (p: Product) => {
-    await mockDataService.update(p.id, { active: !p.active });
-    await loadData();
+    setActionError(null);
+    try {
+      await dataService.update(p.id, { active: !p.active }, currentWorkspace?.id);
+      await loadData();
+    } catch (err) {
+      setActionError(formatCloudErrorForUser(err, 'No se pudo actualizar el estado del producto.').message);
+    }
   };
 
   // Open Create Modal
@@ -303,56 +349,68 @@ export const ProductsPage: React.FC = () => {
       const catName = selectedCat ? selectedCat.name : formData.categoryName || 'General';
 
       if (editingProduct) {
-        await mockDataService.update(editingProduct.id, {
-          name: formData.name.trim(),
-          sku: formData.sku.trim(),
-          ean: cleanEan,
-          categoryId: formData.categoryId,
-          categoryName: catName,
-          brand: formData.brand.trim() || undefined,
-          price: priceNum,
-          compareAtPrice: compareNum,
-          stock: validStock,
-          description: formData.description.trim() || undefined,
-          imageUrl: formData.imageUrl.trim() || undefined,
-          active: formData.active,
-        });
+        await dataService.update(
+          editingProduct.id,
+          {
+            name: formData.name.trim(),
+            sku: formData.sku.trim(),
+            ean: cleanEan,
+            categoryId: formData.categoryId,
+            categoryName: catName,
+            brand: formData.brand.trim() || undefined,
+            price: priceNum,
+            compareAtPrice: compareNum,
+            stock: validStock,
+            description: formData.description.trim() || undefined,
+            imageUrl: formData.imageUrl.trim() || undefined,
+            active: formData.active,
+          },
+          currentWorkspace?.id
+        );
         setEditingProduct(null);
       } else {
-        await mockDataService.create({
-          name: formData.name.trim(),
-          sku: formData.sku.trim(),
-          ean: cleanEan,
-          categoryId: formData.categoryId,
-          categoryName: catName,
-          brand: formData.brand.trim() || undefined,
-          price: priceNum,
-          compareAtPrice: compareNum,
-          currency: 'COP',
-          stock: validStock,
-          description: formData.description.trim() || undefined,
-          imageUrl: formData.imageUrl.trim() || undefined,
-          imageVerified: false,
-          imageMatchStatus: formData.imageUrl ? 'pending_review' : 'no_image',
-          active: formData.active,
-        });
+        await dataService.create(
+          {
+            name: formData.name.trim(),
+            sku: formData.sku.trim(),
+            ean: cleanEan,
+            categoryId: formData.categoryId,
+            categoryName: catName,
+            brand: formData.brand.trim() || undefined,
+            price: priceNum,
+            compareAtPrice: compareNum,
+            currency: 'COP',
+            stock: validStock,
+            description: formData.description.trim() || undefined,
+            imageUrl: formData.imageUrl.trim() || undefined,
+            imageVerified: false,
+            imageMatchStatus: formData.imageUrl ? 'pending_review' : 'no_image',
+            active: formData.active,
+          },
+          currentWorkspace?.id
+        );
         setIsCreatingProduct(false);
       }
 
       await loadData();
     } catch (err: any) {
-      setFormError(err?.message || 'Error al guardar el producto.');
+      setFormError(formatCloudErrorForUser(err, 'Error al guardar el producto.').message);
     }
   };
 
   // Add new Category handler
   const handleCreateCategory = async () => {
     if (!newCategoryName.trim()) return;
-    const created = await mockDataService.createCategory(newCategoryName);
-    setNewCategoryName('');
-    const cats = await mockDataService.getCategories();
-    setCategories(cats);
-    setFormData((prev) => ({ ...prev, categoryId: created.id, categoryName: created.name }));
+    setActionError(null);
+    try {
+      const created = await dataService.createCategory(newCategoryName, currentWorkspace?.id);
+      setNewCategoryName('');
+      const cats = await dataService.getCategories(currentWorkspace?.id);
+      setCategories(cats);
+      setFormData((prev) => ({ ...prev, categoryId: created.id, categoryName: created.name }));
+    } catch (err) {
+      setActionError(formatCloudErrorForUser(err, 'No se pudo crear la categoría.').message);
+    }
   };
 
   if (loading) {
@@ -524,8 +582,22 @@ export const ProductsPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Empty State */}
-      {filteredProducts.length === 0 ? (
+      {actionError && (
+        <div className="p-4 bg-rose-50 dark:bg-rose-950/70 border border-rose-200 dark:border-rose-900 rounded-2xl flex items-center justify-between gap-3 text-xs text-rose-800 dark:text-rose-200">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>{actionError}</span>
+          </div>
+          <button onClick={() => setActionError(null)} className="font-bold">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Query Error State or Empty State */}
+      {queryError ? (
+        <QueryStateAlert error={queryError} onRetry={() => void loadData()} />
+      ) : filteredProducts.length === 0 ? (
         <div className="p-12 text-center bg-white dark:bg-slate-900 border border-dashed border-slate-300 dark:border-slate-800 rounded-3xl">
           <Filter className="w-10 h-10 mx-auto text-slate-400 mb-3" />
           <h3 className="text-base font-semibold text-slate-900 dark:text-white">

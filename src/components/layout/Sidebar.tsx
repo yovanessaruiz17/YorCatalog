@@ -20,7 +20,6 @@ import {
   Globe,
   Database,
   Building2,
-  ShieldCheck,
 } from 'lucide-react';
 import { useSettings } from '../../context/SettingsContext';
 import { useAuth } from '../../context/AuthContext';
@@ -32,7 +31,7 @@ interface SidebarProps {
 
 export const Sidebar: React.FC<SidebarProps> = () => {
   const { t, theme, updateSettings, language, settings, isDark } = useSettings();
-  const { currentWorkspace, isLiveSupabase } = useAuth();
+  const { currentWorkspace, connectionState } = useAuth();
 
   const navItems = [
     { to: '/', label: t.nav.dashboard, icon: LayoutDashboard, exact: true, badge: undefined },
@@ -48,13 +47,19 @@ export const Sidebar: React.FC<SidebarProps> = () => {
 
   const toggleTheme = () => {
     const nextTheme = theme === 'dark' ? 'light' : 'dark';
-    updateSettings({ theme: nextTheme });
+    void updateSettings({ theme: nextTheme }).catch(() => {
+      // Errores manejados desde SettingsContext
+    });
   };
 
   const toggleLanguage = () => {
     const nextLang = language === 'es' ? 'en' : 'es';
-    updateSettings({ language: nextLang });
+    void updateSettings({ language: nextLang }).catch(() => {
+      // Errores manejados desde SettingsContext
+    });
   };
+
+  const isConnected = connectionState === 'connected';
 
   return (
     <aside className="hidden lg:flex flex-col w-64 h-screen sticky top-0 bg-white dark:bg-slate-950 border-r border-slate-200 dark:border-slate-800/80 transition-colors z-30 select-none font-sans">
@@ -63,8 +68,16 @@ export const Sidebar: React.FC<SidebarProps> = () => {
         <div className="relative flex items-center justify-center w-10 h-10 rounded-xl bg-slate-950 dark:bg-emerald-600 text-white shadow-xs">
           <BookOpen className="w-5 h-5 text-emerald-400 dark:text-white" />
           <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+            <span
+              className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
+                isConnected ? 'bg-emerald-400' : 'bg-amber-400'
+              }`}
+            ></span>
+            <span
+              className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
+                isConnected ? 'bg-emerald-500' : 'bg-amber-500'
+              }`}
+            ></span>
           </span>
         </div>
         <div className="flex flex-col min-w-0">
@@ -73,7 +86,9 @@ export const Sidebar: React.FC<SidebarProps> = () => {
           </span>
           <span className="text-[10px] font-medium tracking-wide uppercase text-slate-400 dark:text-slate-500 truncate flex items-center gap-1">
             <Building2 className="w-2.5 h-2.5" />
-            <span className="truncate">{currentWorkspace?.name || settings.businessName || 'Comercial PWA'}</span>
+            <span className="truncate">
+              {currentWorkspace?.name || settings.businessName || 'Comercial PWA'}
+            </span>
           </span>
         </div>
       </div>
@@ -118,25 +133,25 @@ export const Sidebar: React.FC<SidebarProps> = () => {
         })}
       </div>
 
-      {/* Fase 5 Status Card */}
+      {/* Status Card */}
       <div className="px-4 py-3 mx-3 my-2 bg-slate-50 dark:bg-slate-900/60 border border-slate-200/80 dark:border-slate-800/80 rounded-xl space-y-1">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-1.5">
             <Database className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
             <span className="text-[11px] font-semibold text-slate-800 dark:text-slate-200">
-              Fase 5: Producción
+              Cloud-Only Firebase
             </span>
           </div>
           <span
             className={`w-2 h-2 rounded-full ${
-              isLiveSupabase ? 'bg-emerald-500 animate-pulse' : 'bg-blue-500'
+              isConnected ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'
             }`}
           />
         </div>
         <p className="text-[10px] text-slate-500 dark:text-slate-400 leading-tight">
-          {isLiveSupabase
-            ? 'PostgreSQL multi-tenant con RLS y Storage en Supabase.'
-            : 'Modo local activo. Listo para conectar Supabase.'}
+          {isConnected
+            ? 'Firestore multi-tenant, Auth y Storage activos.'
+            : 'Sin confirmación actual de Cloud Firestore.'}
         </p>
       </div>
 
@@ -145,7 +160,7 @@ export const Sidebar: React.FC<SidebarProps> = () => {
         <PWAInstallButton variant="full" className="w-full justify-center" />
       </div>
 
-      {/* Footer Controls: Language & Theme */}
+      {/* Footer Controls */}
       <div className="flex items-center justify-between px-4 py-3 border-t border-slate-100 dark:border-slate-800/60 bg-slate-50/50 dark:bg-slate-900/30 text-xs text-slate-500">
         <button
           onClick={toggleLanguage}
@@ -161,11 +176,15 @@ export const Sidebar: React.FC<SidebarProps> = () => {
           className="flex items-center gap-1.5 px-2.5 py-1 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white rounded-md transition"
           title={isDark ? 'Modo claro' : 'Modo oscuro'}
         >
-          {isDark ? <Sun className="w-3.5 h-3.5 text-amber-400" /> : <Moon className="w-3.5 h-3.5 text-slate-600" />}
+          {isDark ? (
+            <Sun className="w-3.5 h-3.5 text-amber-400" />
+          ) : (
+            <Moon className="w-3.5 h-3.5 text-slate-600" />
+          )}
           <span className="text-[11px] font-medium">{isDark ? 'Dark' : 'Light'}</span>
         </button>
 
-        <span className="text-[10px] font-mono text-slate-400">v5.0</span>
+        <span className="text-[10px] font-mono text-slate-400">v5.2</span>
       </div>
     </aside>
   );

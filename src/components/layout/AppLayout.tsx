@@ -9,6 +9,7 @@ import { Sidebar } from './Sidebar';
 import { Header } from './Header';
 import { MobileNav } from './MobileNav';
 import { OfflineIndicator } from '../pwa/OfflineIndicator';
+import { CloudOnlyNotice } from '../common/CloudOnlyNotice';
 import { LayoutDashboard, Package, BookOpen, ShoppingBag } from 'lucide-react';
 import { useSettings } from '../../context/SettingsContext';
 
@@ -20,6 +21,9 @@ export const AppLayout: React.FC = () => {
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col antialiased selection:bg-emerald-500 selection:text-white">
       {/* Offline banner */}
       <OfflineIndicator />
+
+      {/* Cloud-Only Unconfigured Banner */}
+      <CloudOnlyNotice variant="banner" />
 
       {/* Mobile Drawer */}
       <MobileNav isOpen={mobileNavOpen} onClose={() => setMobileNavOpen(false)} />

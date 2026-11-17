@@ -16,27 +16,38 @@ import {
   Sliders,
   QrCode,
   Sparkles,
+  AlertCircle,
 } from 'lucide-react';
 import { useSettings } from '../context/SettingsContext';
+import { useAuth } from '../context/AuthContext';
+import { formatCloudErrorForUser } from '../services/firebaseClient';
 import { SupportedCurrency, SupportedLanguage, ThemeMode } from '../types';
 
 export const SettingsPage: React.FC = () => {
   const { settings, updateSettings, t } = useSettings();
+  const { currentWorkspace, isLiveFirebase, connectionState } = useAuth();
   const [formData, setFormData] = useState(settings);
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     setFormData(settings);
-  }, [settings]);
+    setActionError(null);
+    setSavedSuccess(false);
+  }, [settings, currentWorkspace?.id]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
+    setSavedSuccess(false);
+    setActionError(null);
     try {
-      await updateSettings(formData);
+      await updateSettings(formData, currentWorkspace?.id);
       setSavedSuccess(true);
       setTimeout(() => setSavedSuccess(false), 3000);
+    } catch (err) {
+      setActionError(formatCloudErrorForUser(err, 'No se pudo guardar la configuración en Cloud Firestore.').message);
     } finally {
       setSaving(false);
     }
@@ -62,6 +73,13 @@ export const SettingsPage: React.FC = () => {
           </div>
         )}
       </div>
+
+      {actionError && (
+        <div className="p-4 bg-rose-50 dark:bg-rose-950/70 border border-rose-200 dark:border-rose-900 rounded-2xl flex items-center gap-2.5 text-xs text-rose-800 dark:text-rose-200">
+          <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+          <span>{actionError}</span>
+        </div>
+      )}
 
       <form onSubmit={handleSubmit} className="space-y-6">
         {/* Section 1: Business Profile */}
@@ -327,7 +345,7 @@ export const SettingsPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Section 6: Supabase & Production Infrastructure (Fase 5) */}
+        {/* Section 6: Firebase Cloud-Only & Multi-Tenant Infrastructure */}
         <div className="p-6 bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 rounded-3xl shadow-xs space-y-4">
           <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800">
             <div className="flex items-center gap-2.5">
@@ -335,11 +353,11 @@ export const SettingsPage: React.FC = () => {
                 ⚡
               </div>
               <h2 className="text-sm font-bold text-slate-900 dark:text-white uppercase tracking-wider">
-                Infraestructura y Persistencia (Supabase & Multi-Tenant)
+                Infraestructura Cloud-Only (Firebase & Multi-Tenant)
               </h2>
             </div>
             <span className="px-2.5 py-0.5 text-[10px] font-bold uppercase rounded-md bg-emerald-100 dark:bg-emerald-950/80 text-emerald-800 dark:text-emerald-300">
-              Fase 5 Integrada
+              {isLiveFirebase ? `Conectado (${connectionState})` : 'No Configurado'}
             </span>
           </div>
 
@@ -349,23 +367,27 @@ export const SettingsPage: React.FC = () => {
                 Estado del Motor de Persistencia:
               </span>
               <div className="flex items-center gap-2">
-                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+                <span
+                  className={`w-2.5 h-2.5 rounded-full ${
+                    isLiveFirebase ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'
+                  }`}
+                />
                 <span className="font-medium text-slate-700 dark:text-slate-300">
-                  Arquitectura Dual: Supabase PostgreSQL + Adaptador Local
+                  Arquitectura Cloud-Only: Cloud Firestore + Firebase Auth + Storage
                 </span>
               </div>
               <p className="text-[11px] text-slate-500 leading-relaxed">
-                Cuando configuras <code>VITE_SUPABASE_URL</code> y <code>VITE_SUPABASE_ANON_KEY</code>, la aplicación sincroniza directamente con tu instancia de base de datos relacional y storage. En ausencia de llaves remotas, conmuta al adaptador seguro local sin interrupciones.
+                Toda la información comercial del workspace se sincroniza en tiempo real exclusivamente contra Firebase. No existe persistencia comercial en localStorage, sessionStorage ni IndexedDB.
               </p>
             </div>
 
             <div className="p-4 bg-slate-50 dark:bg-slate-800/50 rounded-2xl border border-slate-100 dark:border-slate-800 space-y-1.5 font-mono text-[11px]">
               <span className="font-bold font-sans text-slate-900 dark:text-white block mb-1">
-                Migraciones SQL Versionadas:
+                Reglas y Estructura Versionada:
               </span>
-              <div className="text-slate-600 dark:text-slate-300">✓ 001_initial_schema.sql (13 tablas multi-tenant)</div>
-              <div className="text-slate-600 dark:text-slate-300">✓ 002_multi_tenant_rls.sql (Políticas RLS y acceso anónimo a catálogos publicados)</div>
-              <div className="text-slate-600 dark:text-slate-300">✓ 003_storage_buckets.sql (catalog-images, workspace-assets, import-temp)</div>
+              <div className="text-slate-600 dark:text-slate-300">✓ firebase-blueprint.json (Esquema multi-tenant por workspace)</div>
+              <div className="text-slate-600 dark:text-slate-300">✓ firestore.rules (Aislamiento por rol/workspace y tokens publicados)</div>
+              <div className="text-slate-600 dark:text-slate-300">✓ Firebase Storage (catalog-images/{'{workspaceId}'}/...)</div>
             </div>
           </div>
         </div>

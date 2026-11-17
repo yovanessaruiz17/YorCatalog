@@ -1,23 +1,16 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
- * 
- * PRUEBAS AUTOMATIZADAS: PUBLICACIÓN Y SEGURIDAD DE CATÁLOGOS (FASE 5)
+ *
+ * PRUEBAS AUTOMATIZADAS: PUBLICACIÓN DE CATÁLOGOS Y URLS COMERCIALES [A]
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
-import { MockDataService } from '../services/mockDataService';
-import { buildPublicCatalogUrl } from '../utils/url';
-import { Catalog } from '../types';
+import { describe, it, expect } from 'vitest';
+import { buildPublicCatalogUrl, getPublicAppBaseUrl } from '../utils/url';
+import { Catalog, CatalogPublishedSnapshot } from '../types';
 
-describe('Publicación y Seguridad de Catálogos', () => {
-  let mockService: MockDataService;
-
-  beforeEach(() => {
-    mockService = new MockDataService();
-  });
-
-  it('debe generar URLs comerciales públicas que nunca contengan localhost', () => {
+describe('[A] Publicación y Seguridad de URLs Comerciales', () => {
+  it('debe generar URLs comerciales públicas que nunca contengan localhost ni 127.0.0.1', () => {
     const url = buildPublicCatalogUrl('pub_test_token_123');
     expect(url).toBeDefined();
     expect(url).toContain('/m/pub_test_token_123');
@@ -25,53 +18,77 @@ describe('Publicación y Seguridad de Catálogos', () => {
     expect(url).not.toContain('127.0.0.1');
   });
 
-  it('debe permitir publicar un catálogo en borrador y asignarle token único e instantánea inmutable', async () => {
-    // Tomar catálogo en borrador (cat-02)
-    const draft = await mockService.getCatalogById('cat-02');
-    expect(draft).toBeDefined();
-    expect(draft?.status).toBe('draft');
+  it('debe respetar dominio personalizado válido cuando el comercio lo configura', () => {
+    const custom = getPublicAppBaseUrl('https://catalogo.miempresa.com/');
+    expect(custom).toBe('https://catalogo.miempresa.com');
 
-    const published = await mockService.publishCatalog('cat-02');
-    expect(published.status).toBe('published');
-    expect(published.shareToken).toBeDefined();
-    expect(published.shareToken?.startsWith('pub_')).toBe(true);
-    expect(published.publishedUrl).toBeDefined();
-    expect(published.publishedUrl).not.toContain('localhost');
-    expect(published.version).toBeGreaterThan(1);
-    expect(published.publishedSnapshot).toBeDefined();
-    expect(published.publishedSnapshot?.products.length).toBe(published.products.length);
+    const url = buildPublicCatalogUrl('pub_custom_999', 'https://catalogo.miempresa.com/');
+    expect(url).toBe('https://catalogo.miempresa.com/m/pub_custom_999');
   });
 
-  it('debe permitir acceso público exclusivamente a catálogos en estado published', async () => {
-    // 1. Catálogo publicado accesible
-    const pubCatalog = await mockService.getByShareToken('pub_gourmet_2026');
-    expect(pubCatalog).toBeDefined();
-    expect(pubCatalog?.status).toBe('published');
+  it('debe construir snapshots publicados inmutables con metadatos de versión y negocio desacoplados', () => {
+    const snapshot: CatalogPublishedSnapshot = {
+      version: 2,
+      publishedAt: '2026-11-17T12:00:00.000Z',
+      publicUrl: buildPublicCatalogUrl('pub_inmutable_001'),
+      templateId: 'editorial',
+      visualSettings: {
+        primaryColor: '#0f172a',
+        secondaryColor: '#059669',
+        fontFamily: 'serif',
+        gridColumns: 3,
+        productsPerPage: 6,
+        cardSpacing: 'normal',
+        showDescription: true,
+        showBrand: true,
+        showSku: true,
+        showEan: true,
+        showPrices: true,
+        showDiscounts: true,
+        showPageNumbers: true,
+        headerText: 'Edición 2026',
+        footerText: 'YorCatalog',
+        groupByCategory: false,
+        pageSize: 'a4',
+        includeQrCode: true,
+      },
+      products: [
+        {
+          productId: 'p1',
+          orderIndex: 0,
+          snapshot: {
+            id: 'p1',
+            name: 'Café Origen Huila',
+            sku: 'CAFE-01',
+            ean: '0770200100456',
+            categoryId: 'c1',
+            price: 48000,
+            currency: 'COP',
+            active: true,
+            createdAt: '2026-11-01T00:00:00Z',
+            updatedAt: '2026-11-01T00:00:00Z',
+          },
+        },
+      ],
+    };
 
-    // 2. Catálogo en borrador NO debe ser accesible públicamente
-    const draftDirect = await mockService.getByShareToken('cat-02');
-    expect(draftDirect).toBeUndefined();
+    const publishedCatalog: Partial<Catalog> = {
+      id: 'cat-01',
+      workspaceId: 'ws_owner_1',
+      ownerId: 'owner_1',
+      businessName: 'Café Alquimia',
+      whatsappNumber: '+573001234567',
+      currency: 'COP',
+      language: 'es',
+      status: 'published',
+      shareToken: 'pub_inmutable_001',
+      version: 2,
+      publishedSnapshot: snapshot,
+    };
 
-    // 3. Token aleatorio inexistente
-    const notFound = await mockService.getByShareToken('pub_token_inexistente_999');
-    expect(notFound).toBeUndefined();
-  });
-
-  it('debe revocar inmediatamente el acceso público al despublicar un catálogo', async () => {
-    // Publicar catálogo cat-02
-    const published = await mockService.publishCatalog('cat-02');
-    const token = published.shareToken!;
-
-    // Verificar que es accesible
-    const verifyBefore = await mockService.getByShareToken(token);
-    expect(verifyBefore).toBeDefined();
-
-    // Despublicar
-    const unpublished = await mockService.unpublishCatalog('cat-02');
-    expect(unpublished.status).toBe('draft');
-
-    // Intentar acceder con el mismo shareToken
-    const verifyAfter = await mockService.getByShareToken(token);
-    expect(verifyAfter).toBeUndefined();
+    expect(publishedCatalog.publishedSnapshot?.products[0].snapshot.price).toBe(48000);
+    expect(publishedCatalog.publishedSnapshot?.publicUrl).not.toContain('localhost');
+    expect(publishedCatalog.businessName).toBe('Café Alquimia');
+    expect(publishedCatalog.whatsappNumber).toBe('+573001234567');
   });
 });

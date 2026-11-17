@@ -3,9 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
 import { BusinessSettings, SupportedCurrency, SupportedLanguage, ThemeMode } from '../types';
 import { DEFAULT_SETTINGS, settingsService } from '../services/settingsService';
+import { useAuth } from './AuthContext';
 import { translations } from '../utils/i18n';
 import { formatCurrency, formatDate as fmtDate } from '../utils/formatters';
 
@@ -15,7 +16,9 @@ interface SettingsContextValue {
   theme: ThemeMode;
   currency: SupportedCurrency;
   language: SupportedLanguage;
-  updateSettings: (newSettings: Partial<BusinessSettings>) => Promise<void>;
+  settingsError: string | null;
+  updateSettings: (newSettings: Partial<BusinessSettings>, workspaceId?: string) => Promise<void>;
+  loadWorkspaceSettings: (workspaceId: string) => Promise<void>;
   formatPrice: (amount: number) => string;
   formatDate: (isoDate: string) => string;
   isDark: boolean;
@@ -24,17 +27,40 @@ interface SettingsContextValue {
 const SettingsContext = createContext<SettingsContextValue | undefined>(undefined);
 
 export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { user, currentWorkspace } = useAuth();
   const [settings, setSettings] = useState<BusinessSettings>(DEFAULT_SETTINGS);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
   const [isDark, setIsDark] = useState<boolean>(false);
 
-  useEffect(() => {
-    // Load initial settings
-    settingsService.getSettings().then((loaded) => {
+  const loadWorkspaceSettings = useCallback(async (workspaceId: string) => {
+    if (!workspaceId) return;
+    setSettingsError(null);
+    try {
+      const loaded = await settingsService.getSettings(workspaceId);
       setSettings(loaded);
-    });
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'No se pudo cargar la configuración del workspace desde Firestore.';
+      setSettingsError(msg);
+      throw err;
+    }
   }, []);
 
-  // Sync theme with DOM
+  // Limpiar configuración privada al cerrar sesión y recargar al cambiar de workspace
+  useEffect(() => {
+    if (!user || !currentWorkspace?.id) {
+      setSettings(DEFAULT_SETTINGS);
+      setSettingsError(null);
+      return;
+    }
+    void loadWorkspaceSettings(currentWorkspace.id).catch(() => {
+      // El estado settingsError ya queda registrado para la UI
+    });
+  }, [user, currentWorkspace?.id, loadWorkspaceSettings]);
+
+  // Sincronizar tema con el DOM
   useEffect(() => {
     const applyTheme = () => {
       let dark = false;
@@ -61,10 +87,29 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   }, [settings.theme]);
 
-  const updateSettings = async (partial: Partial<BusinessSettings>) => {
+  /**
+   * Bloque 2 (R2.2): Persiste primero en Firestore antes de confirmar el estado en React.
+   * Si no hay workspaceId (ej. visitante o sin workspace), actualiza solo preferencia visual en memoria de sesión.
+   */
+  const updateSettings = async (partial: Partial<BusinessSettings>, workspaceId?: string) => {
+    const targetWorkspaceId = workspaceId || currentWorkspace?.id;
     const updated = { ...settings, ...partial };
-    setSettings(updated);
-    await settingsService.saveSettings(updated);
+    setSettingsError(null);
+
+    if (targetWorkspaceId) {
+      try {
+        await settingsService.saveSettings(updated, targetWorkspaceId);
+        setSettings(updated);
+      } catch (err) {
+        const msg =
+          err instanceof Error ? err.message : 'Error al guardar ajustes en Firestore.';
+        setSettingsError(msg);
+        throw err;
+      }
+    } else {
+      // Preferencia visual temporal de UI sin workspace autenticado
+      setSettings(updated);
+    }
   };
 
   const t = translations[settings.language] || translations.es;
@@ -85,7 +130,9 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         theme: settings.theme,
         currency: settings.currency,
         language: settings.language,
+        settingsError,
         updateSettings,
+        loadWorkspaceSettings,
         formatPrice,
         formatDate,
         isDark,
