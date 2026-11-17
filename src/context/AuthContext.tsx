@@ -4,7 +4,11 @@
  *
  * CONTEXTO DE AUTENTICACIÓN Y MULTI-TENANCY CLOUD-ONLY (FIREBASE AUTH + FIRESTORE)
  * Conecta exclusivamente con Firebase Auth y Cloud Firestore.
- * Se prohíbe cualquier mecanismo de sesión simulada en localStorage o persistencia comercial local.
+ * Descubrimiento multi-tenant unificado:
+ * - Workspaces propios (`where('ownerId', '==', uid)`) + backfill de índice `/users/{uid}/memberships`.
+ * - Workspaces colaborativos (`admin` / `member`) descubiertos vía `/users/{uid}/memberships/{workspaceId}`
+ *   y validados contra `/workspaces/{workspaceId}/members/{uid}`.
+ * - Descubrimiento y aceptación atómica de invitaciones pendientes por correo verificado.
  */
 
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
@@ -25,6 +29,7 @@ import {
   getDoc,
   getDocs,
   setDoc,
+  deleteDoc,
   collection,
   query,
   where,
@@ -42,19 +47,26 @@ import {
   formatCloudErrorForUser,
 } from '../services/firebaseClient';
 import { firebaseDataService, sanitizeFirestoreId } from '../services/firebaseDataService';
-import { Profile, Workspace, WorkspaceRole } from '../types';
+import { clearPrivateAssetUrlCache } from '../services/imageService';
+import { Profile, Workspace, WorkspaceInvitation, WorkspaceRole } from '../types';
 
 interface AuthContextType {
   user: User | null;
   profile: Profile | null;
   currentWorkspace: Workspace | null;
   workspaces: Workspace[];
+  pendingInvitations: WorkspaceInvitation[];
   role: WorkspaceRole;
   loading: boolean;
   isLiveFirebase: boolean;
   connectionState: CloudConnectionCode;
   connectionError: string | null;
   retryConnection: () => Promise<void>;
+  refreshWorkspaces: () => Promise<void>;
+  resendEmailVerification: () => Promise<{ error?: string; sent?: boolean }>;
+  refreshEmailVerification: () => Promise<{ verified: boolean; error?: string }>;
+  acceptInvitation: (invitation: WorkspaceInvitation) => Promise<{ error?: string }>;
+  ensurePersonalWorkspace: (workspaceName?: string) => Promise<{ error?: string }>;
   signInWithGoogle: (workspaceName?: string) => Promise<{ error?: string }>;
   signIn: (email: string, password: string) => Promise<{ error?: string }>;
   signUp: (
@@ -77,10 +89,28 @@ function mapTimestamp(val: unknown): string {
   return new Date().toISOString();
 }
 
+function mapWorkspaceFromDoc(id: string, data: Record<string, any>): Workspace {
+  return {
+    id: data.id || id,
+    name: data.name || 'Mi Negocio Comercial',
+    slug: data.slug || id,
+    tagline: data.tagline || undefined,
+    logoUrl: data.logoUrl || undefined,
+    whatsappNumber: data.whatsappNumber || '',
+    contactEmail: data.contactEmail || undefined,
+    currency: data.currency || 'COP',
+    language: data.language || 'es',
+    theme: data.theme || 'light',
+    settingsJson: data.settingsJson,
+    createdAt: mapTimestamp(data.createdAt),
+  };
+}
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [pendingInvitations, setPendingInvitations] = useState<WorkspaceInvitation[]>([]);
   const [workspaceRoles, setWorkspaceRoles] = useState<Record<string, WorkspaceRole>>({});
   const [currentWorkspace, setCurrentWorkspace] = useState<Workspace | null>(null);
   const [role, setRole] = useState<WorkspaceRole>('member');
@@ -94,10 +124,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const clearPrivateAuthState = useCallback(() => {
     firebaseDataService.clearRuntimeCaches();
+    clearPrivateAssetUrlCache();
     setUser(null);
     setProfile(null);
     setCurrentWorkspace(null);
     setWorkspaces([]);
+    setPendingInvitations([]);
     setWorkspaceRoles({});
     setRole('member');
   }, []);
@@ -114,8 +146,101 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setConnectionError(result.message || null);
   }, []);
 
+  const provisionPersonalWorkspace = useCallback(
+    async (firebaseUser: User, preferredWorkspaceName?: string): Promise<Workspace | null> => {
+      if (!db || !firebaseUser.emailVerified) return null;
+
+      const uid = firebaseUser.uid;
+      const email = (firebaseUser.email || `${uid}@yorcatalog.local`).slice(0, 254);
+      const displayName = (
+        firebaseUser.displayName ||
+        email.split('@')[0] ||
+        'Administrador'
+      )
+        .trim()
+        .slice(0, 120);
+
+      const defaultWsId = sanitizeFirestoreId(`ws_${uid}`, 'ws');
+      const wsRef = doc(db, 'workspaces', defaultWsId);
+      const existingDefault = await getDoc(wsRef);
+
+      if (!existingDefault.exists()) {
+        const wsName = (preferredWorkspaceName || 'Mi Negocio Comercial').trim().slice(0, 120);
+        const wsSlug = sanitizeFirestoreId(
+          `${wsName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${uid.slice(0, 6)}`,
+          'ws'
+        );
+        const batch = writeBatch(db);
+        batch.set(wsRef, {
+          id: defaultWsId,
+          ownerId: uid,
+          name: wsName,
+          slug: wsSlug,
+          tagline: 'Catálogos comerciales digitales y pedidos por WhatsApp',
+          logoUrl: null,
+          whatsappNumber: '+573001234567',
+          contactEmail: email,
+          currency: 'COP',
+          language: 'es',
+          theme: 'light',
+          settingsJson: {
+            showPrices: true,
+            showStock: false,
+            defaultTemplate: 'editorial',
+            allowDirectOrder: true,
+            includeQrCode: true,
+          },
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+
+        batch.set(doc(db, 'workspaces', defaultWsId, 'members', uid), {
+          id: uid,
+          workspaceId: defaultWsId,
+          userId: uid,
+          role: 'owner',
+          email,
+          fullName: displayName,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+
+        batch.set(doc(db, 'users', uid, 'memberships', defaultWsId), {
+          id: defaultWsId,
+          workspaceId: defaultWsId,
+          userId: uid,
+          workspaceName: wsName,
+          role: 'owner',
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+
+        await batch.commit();
+
+        return {
+          id: defaultWsId,
+          name: wsName,
+          slug: wsSlug,
+          tagline: 'Catálogos comerciales digitales y pedidos por WhatsApp',
+          whatsappNumber: '+573001234567',
+          contactEmail: email,
+          currency: 'COP',
+          language: 'es',
+          theme: 'light',
+          createdAt: new Date().toISOString(),
+        };
+      }
+
+      return mapWorkspaceFromDoc(defaultWsId, existingDefault.data());
+    },
+    []
+  );
+
   const ensureUserProfileAndWorkspace = useCallback(
-    async (firebaseUser: User, preferredWorkspaceName?: string) => {
+    async (
+      firebaseUser: User,
+      options?: { preferredWorkspaceName?: string; autoProvision?: boolean }
+    ) => {
       if (!db) return;
 
       if (!firebaseUser.emailVerified) {
@@ -130,6 +255,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           avatarUrl: firebaseUser.photoURL || undefined,
         });
         setWorkspaces([]);
+        setPendingInvitations([]);
+        setWorkspaceRoles({});
         setCurrentWorkspace(null);
         return;
       }
@@ -175,127 +302,84 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         });
       }
 
-      // 2. Listar workspaces donde el usuario es propietario
-      const wsQuery = query(collection(db, 'workspaces'), where('ownerId', '==', uid));
-      const wsSnap = await getDocs(wsQuery);
+      // 2. Descubrir workspaces propios + membresías colaborativas (admin / member)
+      const [ownedSnap, membershipDocs, pendingInvList] = await Promise.all([
+        getDocs(query(collection(db, 'workspaces'), where('ownerId', '==', uid))),
+        firebaseDataService.listUserMemberships(uid).catch(() => []),
+        firebaseUser.email
+          ? firebaseDataService.listPendingInvitationsForEmail(firebaseUser.email).catch(() => [])
+          : Promise.resolve([]),
+      ]);
 
-      let wsList: Workspace[] = wsSnap.docs.map((d) => {
-        const data = d.data();
-        return {
-          id: data.id || d.id,
-          name: data.name || 'Mi Negocio Comercial',
-          slug: data.slug || d.id,
-          tagline: data.tagline || undefined,
-          logoUrl: data.logoUrl || undefined,
-          whatsappNumber: data.whatsappNumber || '',
-          contactEmail: data.contactEmail || undefined,
-          currency: data.currency || 'COP',
-          language: data.language || 'es',
-          theme: data.theme || 'light',
-          settingsJson: data.settingsJson,
-          createdAt: mapTimestamp(data.createdAt),
-        };
-      });
+      const discoveredMap = new Map<string, Workspace>();
+      const rolesMap: Record<string, WorkspaceRole> = {};
+      const indexedWorkspaceIds = new Set(membershipDocs.map((m) => m.workspaceId));
 
-      // 3. Si es usuario nuevo, crear workspace inicial /workspaces/ws_{uid} + member /members/{uid} atómicamente
-      if (wsList.length === 0) {
-        const defaultWsId = sanitizeFirestoreId(`ws_${uid}`, 'ws');
-        const wsRef = doc(db, 'workspaces', defaultWsId);
-        const existingDefault = await getDoc(wsRef);
+      for (const d of ownedSnap.docs) {
+        const ws = mapWorkspaceFromDoc(d.id, d.data());
+        discoveredMap.set(ws.id, ws);
+        rolesMap[ws.id] = 'owner';
 
-        if (!existingDefault.exists()) {
-          const wsName = (preferredWorkspaceName || 'Mi Negocio Comercial').trim().slice(0, 120);
-          const wsSlug = sanitizeFirestoreId(
-            `${wsName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${uid.slice(0, 6)}`,
-            'ws'
-          );
-          const batch = writeBatch(db);
-          batch.set(wsRef, {
-            id: defaultWsId,
-            ownerId: uid,
-            name: wsName,
-            slug: wsSlug,
-            tagline: 'Catálogos comerciales digitales y pedidos por WhatsApp',
-            logoUrl: null,
-            whatsappNumber: '+573001234567',
-            contactEmail: email,
-            currency: 'COP',
-            language: 'es',
-            theme: 'light',
-            settingsJson: {
-              showPrices: true,
-              showStock: false,
-              defaultTemplate: 'editorial',
-              allowDirectOrder: true,
-              includeQrCode: true,
-            },
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
-
-          batch.set(doc(db, 'workspaces', defaultWsId, 'members', uid), {
-            id: uid,
-            workspaceId: defaultWsId,
-            userId: uid,
-            role: 'owner',
-            email,
-            fullName: displayName,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
-
-          await batch.commit();
-
-          wsList = [
-            {
-              id: defaultWsId,
-              name: wsName,
-              slug: wsSlug,
-              tagline: 'Catálogos comerciales digitales y pedidos por WhatsApp',
-              whatsappNumber: '+573001234567',
-              contactEmail: email,
-              currency: 'COP',
-              language: 'es',
-              theme: 'light',
-              createdAt: new Date().toISOString(),
-            },
-          ];
-        } else {
-          const d = existingDefault.data();
-          wsList = [
-            {
-              id: d.id || defaultWsId,
-              name: d.name || 'Mi Negocio Comercial',
-              slug: d.slug || defaultWsId,
-              tagline: d.tagline || undefined,
-              logoUrl: d.logoUrl || undefined,
-              whatsappNumber: d.whatsappNumber || '',
-              contactEmail: d.contactEmail || undefined,
-              currency: d.currency || 'COP',
-              language: d.language || 'es',
-              theme: d.theme || 'light',
-              settingsJson: d.settingsJson,
-              createdAt: mapTimestamp(d.createdAt),
-            },
-          ];
+        // Backfill no destructivo del índice de membresía para propietarios existentes
+        if (!indexedWorkspaceIds.has(ws.id)) {
+          try {
+            await setDoc(doc(db, 'users', uid, 'memberships', ws.id), {
+              id: ws.id,
+              workspaceId: ws.id,
+              userId: uid,
+              workspaceName: ws.name.slice(0, 120),
+              role: 'owner',
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+          } catch {
+            // No bloquear acceso si el backfill no pudo escribirse en este ciclo
+          }
         }
       }
 
-      // 4. Cargar roles de cada workspace
-      const rolesMap: Record<string, WorkspaceRole> = {};
-      for (const ws of wsList) {
+      // Validar cada membresía colaborativa contra /workspaces/{wsId} y /workspaces/{wsId}/members/{uid}
+      for (const membership of membershipDocs) {
+        const wsId = membership.workspaceId;
+        if (discoveredMap.has(wsId)) continue;
+
         try {
-          const memberSnap = await getDoc(doc(db, 'workspaces', ws.id, 'members', uid));
-          if (memberSnap.exists()) {
-            rolesMap[ws.id] = (memberSnap.data().role as WorkspaceRole) || 'owner';
+          const [wsSnap, memberSnap] = await Promise.all([
+            getDoc(doc(db, 'workspaces', wsId)),
+            getDoc(doc(db, 'workspaces', wsId, 'members', uid)),
+          ]);
+
+          if (wsSnap.exists() && memberSnap.exists()) {
+            const ws = mapWorkspaceFromDoc(wsSnap.id, wsSnap.data());
+            const liveRole = (memberSnap.data().role as WorkspaceRole) || membership.role || 'member';
+            discoveredMap.set(ws.id, ws);
+            rolesMap[ws.id] = liveRole;
           } else {
-            rolesMap[ws.id] = 'owner';
+            // Membresía revocada o workspace eliminado: limpiar entrada obsoleta del índice
+            await deleteDoc(doc(db, 'users', uid, 'memberships', wsId)).catch(() => undefined);
           }
         } catch {
-          rolesMap[ws.id] = 'owner';
+          // Si Firestore Rules rechazan lectura por revocación, omitir silenciosamente este workspace
         }
       }
 
+      let wsList = Array.from(discoveredMap.values());
+
+      // 3. Si no hay workspaces ni invitaciones pendientes y está habilitado el auto-aprovisionamiento,
+      // crear workspace personal inicial ws_{uid}
+      const shouldAutoProvision = options?.autoProvision ?? true;
+      if (wsList.length === 0 && pendingInvList.length === 0 && shouldAutoProvision) {
+        const createdWs = await provisionPersonalWorkspace(
+          firebaseUser,
+          options?.preferredWorkspaceName
+        );
+        if (createdWs) {
+          wsList = [createdWs];
+          rolesMap[createdWs.id] = 'owner';
+        }
+      }
+
+      setPendingInvitations(pendingInvList);
       setWorkspaces(wsList);
       setWorkspaceRoles(rolesMap);
 
@@ -303,7 +387,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const stillValid = prev ? wsList.find((w) => w.id === prev.id) : undefined;
         const selected = stillValid || wsList[0] || null;
         if (selected) {
-          setRole(rolesMap[selected.id] || 'owner');
+          setRole(rolesMap[selected.id] || 'member');
+        } else {
+          setRole('member');
         }
         return selected;
       });
@@ -311,7 +397,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setConnectionState('connected');
       setConnectionError(null);
     },
-    []
+    [provisionPersonalWorkspace]
   );
 
   useEffect(() => {
@@ -344,7 +430,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
         } else {
           clearPrivateAuthState();
-          // Confirmar si el backend está conectado aunque no haya sesión iniciada
           const res = await testConnection();
           if (isMounted) {
             setConnectionState(res.state);
@@ -406,7 +491,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       provider.setCustomParameters({ prompt: 'select_account' });
       const credential = await signInWithPopup(auth, provider);
       if (credential.user) {
-        await ensureUserProfileAndWorkspace(credential.user, workspaceName);
+        await ensureUserProfileAndWorkspace(credential.user, {
+          preferredWorkspaceName: workspaceName,
+          autoProvision: true,
+        });
       }
       return {};
     } catch (err) {
@@ -421,7 +509,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const credential = await signInWithEmailAndPassword(auth, email.trim(), password);
       if (credential.user && !credential.user.emailVerified) {
-        await sendEmailVerification(credential.user);
+        await sendEmailVerification(credential.user).catch(() => undefined);
         return {
           error:
             'Tu correo aún no está verificado. Te enviamos un enlace de verificación a tu bandeja de entrada (o utiliza Acceso con Google).',
@@ -453,7 +541,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               'Cuenta creada. Por seguridad de Firestore, verifica tu correo electrónico antes de acceder al workspace (o inicia sesión con Google).',
           };
         }
-        await ensureUserProfileAndWorkspace(credential.user, workspaceName);
+        await ensureUserProfileAndWorkspace(credential.user, {
+          preferredWorkspaceName: workspaceName,
+          autoProvision: true,
+        });
       }
       return {};
     } catch (err) {
@@ -484,12 +575,88 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const resendEmailVerification = async (): Promise<{ error?: string; sent?: boolean }> => {
+    if (!isLiveFirebase || !auth || !auth.currentUser) {
+      return { error: 'No hay una sesión autenticada para reenviar el correo de verificación.' };
+    }
+    try {
+      await sendEmailVerification(auth.currentUser);
+      return { sent: true };
+    } catch (err) {
+      return { error: mapAuthErrorMessage(err) };
+    }
+  };
+
+  const refreshEmailVerification = async (): Promise<{ verified: boolean; error?: string }> => {
+    if (!isLiveFirebase || !auth || !auth.currentUser) {
+      return { verified: false, error: 'Tu sesión expiró. Inicia sesión nuevamente.' };
+    }
+    try {
+      await auth.currentUser.reload();
+      await auth.currentUser.getIdToken(true);
+      const refreshed = auth.currentUser;
+      setUser(refreshed);
+      if (refreshed.emailVerified) {
+        await ensureUserProfileAndWorkspace(refreshed);
+        return { verified: true };
+      }
+      return {
+        verified: false,
+        error: 'El correo aún figura como no verificado en Firebase Auth. Revisa tu bandeja o spam.',
+      };
+    } catch (err) {
+      return { verified: false, error: mapAuthErrorMessage(err) };
+    }
+  };
+
+  const acceptInvitation = async (
+    invitation: WorkspaceInvitation
+  ): Promise<{ error?: string }> => {
+    if (!auth?.currentUser) {
+      return { error: 'Debes iniciar sesión con un correo verificado para aceptar invitaciones.' };
+    }
+    try {
+      await firebaseDataService.acceptWorkspaceInvitation(
+        invitation,
+        profile?.fullName || auth.currentUser.displayName || undefined
+      );
+      await ensureUserProfileAndWorkspace(auth.currentUser, { autoProvision: false });
+      return {};
+    } catch (err) {
+      return {
+        error: formatCloudErrorForUser(err, 'No se pudo aceptar la invitación al workspace.').message,
+      };
+    }
+  };
+
+  const ensurePersonalWorkspace = async (workspaceName?: string): Promise<{ error?: string }> => {
+    if (!auth?.currentUser) {
+      return { error: 'Sesión no disponible.' };
+    }
+    try {
+      await provisionPersonalWorkspace(auth.currentUser, workspaceName);
+      await ensureUserProfileAndWorkspace(auth.currentUser, { autoProvision: false });
+      return {};
+    } catch (err) {
+      return {
+        error: formatCloudErrorForUser(err, 'No se pudo crear el workspace comercial.').message,
+      };
+    }
+  };
+
+  const refreshWorkspaces = async () => {
+    if (auth?.currentUser) {
+      await ensureUserProfileAndWorkspace(auth.currentUser, { autoProvision: false });
+    }
+  };
+
   const switchWorkspace = (workspaceId: string) => {
     const found = workspaces.find((w) => w.id === workspaceId);
     if (found) {
       firebaseDataService.clearRuntimeCaches();
+      clearPrivateAssetUrlCache();
       setCurrentWorkspace(found);
-      setRole(workspaceRoles[found.id] || 'owner');
+      setRole(workspaceRoles[found.id] || 'member');
     }
   };
 
@@ -513,12 +680,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         profile,
         currentWorkspace,
         workspaces,
+        pendingInvitations,
         role,
         loading,
         isLiveFirebase,
         connectionState,
         connectionError,
         retryConnection,
+        refreshWorkspaces,
+        resendEmailVerification,
+        refreshEmailVerification,
+        acceptInvitation,
+        ensurePersonalWorkspace,
         signInWithGoogle,
         signIn,
         signUp,

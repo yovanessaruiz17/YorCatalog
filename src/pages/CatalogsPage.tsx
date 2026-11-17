@@ -48,6 +48,7 @@ import { useSettings } from '../context/SettingsContext';
 import { dataService } from '../services/dataService';
 import { formatCloudErrorForUser } from '../services/firebaseClient';
 import { QueryStateAlert, QueryErrorState } from '../components/common/QueryStateAlert';
+import { ProtectedStorageImage } from '../components/common/ProtectedStorageImage';
 import { useAuth } from '../context/AuthContext';
 import { CATALOG_TEMPLATES, DEFAULT_VISUAL_SETTINGS } from '../services/templateCatalog';
 import { generateCatalogPDF, PDFGenerationProgress } from '../services/pdfGenerator';
@@ -539,7 +540,7 @@ export const CatalogsPage: React.FC = () => {
                 {/* Cover Banner */}
                 <div className="relative h-48 bg-slate-900 overflow-hidden">
                   {catalog.coverImage ? (
-                    <img
+                    <ProtectedStorageImage
                       src={catalog.coverImage}
                       alt={catalog.title}
                       className="w-full h-full object-cover opacity-85"
@@ -1452,7 +1453,7 @@ export const CatalogsPage: React.FC = () => {
                   {/* Cover Photo */}
                   <div className="my-4 h-56 rounded-xl overflow-hidden bg-slate-100 border border-slate-200 flex items-center justify-center">
                     {activeCatalog.coverImage ? (
-                      <img
+                      <ProtectedStorageImage
                         src={activeCatalog.coverImage}
                         alt="Portada"
                         className="w-full h-full object-cover"
@@ -1520,7 +1521,7 @@ export const CatalogsPage: React.FC = () => {
                           {/* Photo */}
                           <div className="h-24 bg-slate-100 rounded-lg overflow-hidden flex items-center justify-center relative border border-slate-100">
                             {prod.imageUrl ? (
-                              <img
+                              <ProtectedStorageImage
                                 src={prod.imageUrl}
                                 alt={prod.name}
                                 className="w-full h-full object-cover"

@@ -41,6 +41,7 @@ import {
 import { dataService } from '../services/dataService';
 import { formatCloudErrorForUser } from '../services/firebaseClient';
 import { QueryStateAlert, QueryErrorState } from '../components/common/QueryStateAlert';
+import { ProtectedStorageImage } from '../components/common/ProtectedStorageImage';
 import { useAuth } from '../context/AuthContext';
 import { Category, ImageMatchStatus, Product } from '../types';
 import { useSettings } from '../context/SettingsContext';
@@ -683,7 +684,7 @@ export const ProductsPage: React.FC = () => {
                         <td className="py-3 px-3">
                           <div className="w-12 h-12 rounded-xl bg-slate-100 dark:bg-slate-800 overflow-hidden flex items-center justify-center border border-slate-200 dark:border-slate-700">
                             {p.imageUrl ? (
-                              <img
+                              <ProtectedStorageImage
                                 src={p.imageUrl}
                                 alt={p.name}
                                 className="w-full h-full object-cover"
@@ -812,7 +813,7 @@ export const ProductsPage: React.FC = () => {
                 <div className="flex gap-3">
                   <div className="w-16 h-16 rounded-2xl bg-slate-100 dark:bg-slate-800 overflow-hidden flex items-center justify-center shrink-0 border border-slate-200 dark:border-slate-700">
                     {p.imageUrl ? (
-                      <img src={p.imageUrl} alt={p.name} className="w-full h-full object-cover" />
+                      <ProtectedStorageImage src={p.imageUrl} alt={p.name} className="w-full h-full object-cover" />
                     ) : (
                       <ImageIcon className="w-6 h-6 text-slate-400" />
                     )}
@@ -1244,7 +1245,7 @@ export const ProductsPage: React.FC = () => {
               <div className="flex gap-4 items-start">
                 <div className="w-24 h-24 rounded-2xl bg-slate-100 dark:bg-slate-800 overflow-hidden flex items-center justify-center shrink-0 border border-slate-200 dark:border-slate-700">
                   {inspectProduct.imageUrl ? (
-                    <img
+                    <ProtectedStorageImage
                       src={inspectProduct.imageUrl}
                       alt={inspectProduct.name}
                       className="w-full h-full object-cover"

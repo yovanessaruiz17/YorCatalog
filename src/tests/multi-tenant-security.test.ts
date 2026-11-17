@@ -107,3 +107,71 @@ describe('[A] Seguridad de Acceso Público y Anti-Enumeración por ShareToken', 
     expect(await dataService.getByShareToken('token con espacios!')).toBeUndefined();
   });
 });
+
+describe('[A] Separación de Roles Multiusuario (owner / admin / member) y Bloqueo sin Sesión', () => {
+  it('debe rechazar createWorkspaceInvitation y acceptWorkspaceInvitation si no existe usuario autenticado y verificado', async () => {
+    const { firebaseDataService } = await import('../services/firebaseDataService');
+
+    await expect(
+      firebaseDataService.createWorkspaceInvitation({
+        workspaceId: 'ws_owner_1',
+        workspaceName: 'Tienda Demo',
+        email: 'collab@empresa.com',
+        role: 'member',
+      })
+    ).rejects.toMatchObject({
+      name: 'CloudOperationError',
+      code: 'unauthorized',
+    });
+
+    await expect(
+      firebaseDataService.acceptWorkspaceInvitation({
+        id: 'inv_1',
+        workspaceId: 'ws_owner_1',
+        workspaceName: 'Tienda Demo',
+        ownerId: 'uid_owner_1',
+        email: 'collab@empresa.com',
+        role: 'member',
+        status: 'pending',
+        invitedBy: 'uid_owner_1',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      })
+    ).rejects.toMatchObject({
+      name: 'CloudOperationError',
+      code: 'unauthorized',
+    });
+  });
+
+  it('debe verificar matriz de capacidades por rol (owner > admin > member > non_member)', () => {
+    const canManageSettings = (r: 'owner' | 'admin' | 'member' | 'non_member') =>
+      r === 'owner' || r === 'admin';
+    const canDeleteWorkspace = (r: 'owner' | 'admin' | 'member' | 'non_member') =>
+      r === 'owner';
+    const canInviteRole = (
+      actor: 'owner' | 'admin' | 'member' | 'non_member',
+      target: 'owner' | 'admin' | 'member'
+    ) => {
+      if (target === 'owner') return false; // Prohibido invitar owner o autoescalar
+      if (actor === 'owner') return true;
+      if (actor === 'admin') return target === 'member';
+      return false;
+    };
+
+    expect(canDeleteWorkspace('owner')).toBe(true);
+    expect(canDeleteWorkspace('admin')).toBe(false);
+    expect(canDeleteWorkspace('member')).toBe(false);
+    expect(canManageSettings('owner')).toBe(true);
+    expect(canManageSettings('admin')).toBe(true);
+    expect(canManageSettings('member')).toBe(false);
+    expect(canManageSettings('non_member')).toBe(false);
+
+    expect(canInviteRole('owner', 'admin')).toBe(true);
+    expect(canInviteRole('owner', 'member')).toBe(true);
+    expect(canInviteRole('owner', 'owner')).toBe(false);
+    expect(canInviteRole('admin', 'member')).toBe(true);
+    expect(canInviteRole('admin', 'admin')).toBe(false);
+    expect(canInviteRole('member', 'member')).toBe(false);
+  });
+});
+

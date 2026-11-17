@@ -34,6 +34,7 @@ import { useSettings } from '../context/SettingsContext';
 import { dataService } from '../services/dataService';
 import { isFirebaseConfigured, formatCloudErrorForUser } from '../services/firebaseClient';
 import { QueryStateAlert, QueryErrorState } from '../components/common/QueryStateAlert';
+import { ProtectedStorageImage } from '../components/common/ProtectedStorageImage';
 import {
   processImageFile,
   extractImagesFromZip,
@@ -577,7 +578,7 @@ export const ImagesPage: React.FC = () => {
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-lg bg-slate-100 dark:bg-slate-800 overflow-hidden flex items-center justify-center shrink-0 border border-slate-200 dark:border-slate-700">
                   {p.imageUrl ? (
-                    <img src={p.imageUrl} alt={p.name} className="w-full h-full object-cover" />
+                    <ProtectedStorageImage src={p.imageUrl} alt={p.name} className="w-full h-full object-cover" />
                   ) : (
                     <ImageIcon className="w-4 h-4 text-slate-400" />
                   )}

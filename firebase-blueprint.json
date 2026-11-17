@@ -47,10 +47,45 @@
         "role": { "type": "string", "enum": ["owner", "admin", "member"] },
         "email": { "type": "string", "maxLength": 254 },
         "fullName": { "type": "string", "maxLength": 120 },
+        "invitationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "workspaceId", "userId", "role", "createdAt", "updatedAt"]
+    },
+    "UserMembership": {
+      "title": "UserMembership",
+      "description": "Índice privado por usuario para descubrir workspaces propios y colaborativos sin enumerar terceros.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["owner", "admin", "member"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "workspaceId", "userId", "workspaceName", "role", "createdAt", "updatedAt"]
+    },
+    "WorkspaceInvitation": {
+      "title": "WorkspaceInvitation",
+      "description": "Invitación controlada para sumar colaboradores admin/member a un workspace sin autoescalación.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "workspaceName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 254 },
+        "role": { "type": "string", "enum": ["admin", "member"] },
+        "status": { "type": "string", "enum": ["pending", "accepted", "revoked"] },
+        "invitedBy": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "acceptedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "workspaceId", "workspaceName", "ownerId", "email", "role", "status", "invitedBy", "createdAt", "updatedAt"]
     },
     "Category": {
       "title": "Category",
@@ -216,6 +251,10 @@
       "schema": { "$ref": "#/entities/UserProfile" },
       "description": "Perfiles privados de usuario accesibles únicamente por el titular autenticado."
     },
+    "/users/{userId}/memberships/{workspaceId}": {
+      "schema": { "$ref": "#/entities/UserMembership" },
+      "description": "Índice privado de membresías por usuario para descubrir workspaces propios y colaborativos."
+    },
     "/workspaces/{workspaceId}": {
       "schema": { "$ref": "#/entities/Workspace" },
       "description": "Configuración comercial y metadatos de cada negocio multi-tenant."
@@ -223,6 +262,10 @@
     "/workspaces/{workspaceId}/members/{memberId}": {
       "schema": { "$ref": "#/entities/WorkspaceMember" },
       "description": "Membresías activas del workspace para verificación de acceso."
+    },
+    "/workspaces/{workspaceId}/invitations/{invitationId}": {
+      "schema": { "$ref": "#/entities/WorkspaceInvitation" },
+      "description": "Invitaciones controladas para incorporar colaboradores admin/member."
     },
     "/workspaces/{workspaceId}/categories/{categoryId}": {
       "schema": { "$ref": "#/entities/Category" },

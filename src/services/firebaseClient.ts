@@ -4,7 +4,8 @@
  *
  * CLIENTE CENTRAL DE FIREBASE (CLOUD-ONLY)
  * Inicializa Firebase App, Cloud Firestore (base de datos dedicada del proyecto),
- * Firebase Auth y Firebase Storage a partir de firebase-applet-config.json.
+ * Firebase Auth y Firebase Storage a partir de `resolveFirebaseRuntimeConfig`
+ * (separación explícita development vs production).
  * No habilita caché persistente comercial en IndexedDB (memoria de sesión únicamente).
  */
 
@@ -17,7 +18,13 @@ import {
   getDocFromServer,
 } from 'firebase/firestore';
 import { getStorage, FirebaseStorage } from 'firebase/storage';
-import firebaseConfig from '../../firebase-applet-config.json';
+import {
+  resolveFirebaseRuntimeConfig,
+  FirebaseClientConfig,
+  FirebaseConfigResolution,
+  FirebaseEnvironmentName,
+  FirebaseConfigSource,
+} from './firebaseConfig';
 
 export enum OperationType {
   CREATE = 'create',
@@ -78,22 +85,35 @@ export class CloudOperationError extends Error {
   }
 }
 
-export function isFirebaseConfigured(): boolean {
-  const cfg = firebaseConfig as Record<string, string | undefined>;
-  if (!cfg) return false;
-  const projectId = cfg.projectId || '';
-  const apiKey = cfg.apiKey || '';
-  const appId = cfg.appId || '';
-  const dbId = cfg.firestoreDatabaseId || '';
+const resolvedRuntime: FirebaseConfigResolution = resolveFirebaseRuntimeConfig();
+const activeConfig: FirebaseClientConfig | null = resolvedRuntime.config;
 
-  return Boolean(
-    projectId &&
-      apiKey &&
-      appId &&
-      dbId &&
-      !projectId.includes('remixed-project-id') &&
-      !projectId.includes('your-project')
-  );
+export function isFirebaseConfigured(): boolean {
+  return resolvedRuntime.isConfigured && resolvedRuntime.config !== null;
+}
+
+export interface FirebaseEnvironmentInfo {
+  environment: FirebaseEnvironmentName;
+  isConfigured: boolean;
+  projectId: string | null;
+  firestoreDatabaseId: string | null;
+  storageBucket: string | null;
+  source: FirebaseConfigSource;
+  usingSharedAppletFallback: boolean;
+  configError: string | null;
+}
+
+export function getFirebaseEnvironmentInfo(): FirebaseEnvironmentInfo {
+  return {
+    environment: resolvedRuntime.environment,
+    isConfigured: isFirebaseConfigured(),
+    projectId: activeConfig?.projectId ?? null,
+    firestoreDatabaseId: activeConfig?.firestoreDatabaseId ?? null,
+    storageBucket: activeConfig?.storageBucket ?? null,
+    source: resolvedRuntime.source,
+    usingSharedAppletFallback: resolvedRuntime.usingSharedAppletFallback,
+    configError: resolvedRuntime.configError,
+  };
 }
 
 let appInstance: FirebaseApp | null = null;
@@ -101,10 +121,10 @@ let dbInstance: Firestore | null = null;
 let authInstance: Auth | null = null;
 let storageInstance: FirebaseStorage | null = null;
 
-if (isFirebaseConfigured()) {
-  appInstance = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-  // CRITICAL: Conectar explícitamente a firestoreDatabaseId provisionado en firebase-applet-config.json
-  dbInstance = getFirestore(appInstance, firebaseConfig.firestoreDatabaseId);
+if (isFirebaseConfigured() && activeConfig) {
+  appInstance = getApps().length > 0 ? getApp() : initializeApp(activeConfig);
+  // CRITICAL: Conectar explícitamente a firestoreDatabaseId provisionado para el entorno activo
+  dbInstance = getFirestore(appInstance, activeConfig.firestoreDatabaseId);
   authInstance = getAuth(appInstance);
   storageInstance = getStorage(appInstance);
 }
@@ -113,7 +133,15 @@ export const firebaseApp = appInstance;
 export const db = dbInstance;
 export const auth = authInstance;
 export const storage = storageInstance;
-export { firebaseConfig };
+export const firebaseConfig = (activeConfig ?? {
+  projectId: '',
+  appId: '',
+  apiKey: '',
+  authDomain: '',
+  firestoreDatabaseId: '',
+  storageBucket: '',
+  messagingSenderId: '',
+}) as FirebaseClientConfig;
 
 export interface ConnectionCheckResult {
   state: CloudConnectionCode;
@@ -127,7 +155,9 @@ export async function testConnection(): Promise<ConnectionCheckResult> {
   if (!isFirebaseConfigured() || !db) {
     return {
       state: 'not_configured',
-      message: 'Firebase no está configurado en firebase-applet-config.json.',
+      message:
+        resolvedRuntime.configError ||
+        'Firebase no está configurado correctamente para el entorno actual.',
     };
   }
 
@@ -179,6 +209,8 @@ export function classifyFirebaseError(
   }
 
   const rawCode = ((error as { code?: string })?.code || '').toLowerCase();
+  const status = (error as { status_?: number; status?: number })?.status_ ??
+    (error as { status?: number })?.status;
   const rawMessage =
     error instanceof Error
       ? error.message
@@ -186,6 +218,42 @@ export function classifyFirebaseError(
         ? String((error as { message: string }).message)
         : String(error);
   const msgLower = rawMessage.toLowerCase();
+
+  // Errores específicos de Firebase Storage (bucket no inicializado / HTTP 404 / cuota / permisos)
+  if (
+    rawCode.includes('storage/bucket-not-found') ||
+    rawCode.includes('storage/project-not-found') ||
+    (rawCode.startsWith('storage/') && (status === 404 || msgLower.includes('does not exist') || msgLower.includes('404')))
+  ) {
+    return {
+      code: 'not_configured',
+      userMessage:
+        'El bucket de Firebase Storage no existe o aún no ha sido inicializado en Firebase Console (HTTP 404). Inicializa Storage y despliega storage.rules antes de subir imágenes.',
+    };
+  }
+
+  if (rawCode.includes('storage/quota-exceeded')) {
+    return {
+      code: 'persistence_error',
+      userMessage:
+        'Se alcanzó la cuota máxima de Firebase Storage. Libera espacio o actualiza el plan del proyecto.',
+    };
+  }
+
+  if (rawCode.includes('storage/retry-limit-exceeded') || rawCode.includes('storage/canceled')) {
+    return {
+      code: 'unreachable',
+      userMessage:
+        'La subida hacia Firebase Storage se interrumpió o superó el tiempo de espera. Reintenta con conexión estable.',
+    };
+  }
+
+  if (rawCode.includes('storage/object-not-found')) {
+    return {
+      code: 'persistence_error',
+      userMessage: 'El archivo solicitado no se encuentra en Firebase Storage.',
+    };
+  }
 
   if (
     rawCode.includes('unavailable') ||
@@ -198,19 +266,20 @@ export function classifyFirebaseError(
     return {
       code: 'unreachable',
       userMessage:
-        'Firebase Firestore o Storage se encuentra temporalmente inaccesible. Tus cambios locales siguen en pantalla para reintentar.',
+        'Firebase Firestore o Storage se encuentra temporalmente inaccesible. Tus cambios siguen en pantalla para reintentar.',
     };
   }
 
   if (
     rawCode.includes('unauthenticated') ||
+    rawCode.includes('storage/unauthenticated') ||
     rawCode.includes('user-token-expired') ||
     rawCode.includes('invalid-user-token') ||
     rawCode.includes('requires-recent-login')
   ) {
     return {
       code: 'session_expired',
-      userMessage: 'Tu sesión de Firebase ha expirado. Vuelve a iniciar sesión para continuar.',
+      userMessage: 'Tu sesión de Firebase ha expirado o no has iniciado sesión. Vuelve a iniciar sesión para continuar.',
     };
   }
 
@@ -219,6 +288,20 @@ export function classifyFirebaseError(
       return {
         code: 'session_expired',
         userMessage: 'No hay una sesión autenticada activa. Inicia sesión para acceder al workspace.',
+      };
+    }
+    if (auth?.currentUser && !auth.currentUser.emailVerified) {
+      return {
+        code: 'unauthorized',
+        userMessage:
+          'Debes verificar tu correo electrónico en Firebase Auth antes de acceder o escribir datos en este workspace.',
+      };
+    }
+    if (rawCode.includes('storage/unauthorized')) {
+      return {
+        code: 'unauthorized',
+        userMessage:
+          'Firebase Storage denegó el acceso (storage.rules). Verifica que tu cuenta esté verificada y autorizada en este workspace.',
       };
     }
     return {
@@ -239,7 +322,7 @@ export function classifyFirebaseError(
   if (!isFirebaseConfigured()) {
     return {
       code: 'not_configured',
-      userMessage: 'Firebase no está configurado en el entorno.',
+      userMessage: resolvedRuntime.configError || 'Firebase no está configurado en el entorno.',
     };
   }
 
@@ -281,8 +364,6 @@ export function handleFirestoreError(
 
   console.error('Firestore Error: ', JSON.stringify(errInfo));
 
-  // Si es permission-denied, lanzar el JSON FirestoreErrorInfo requerido por la habilidad de diagnóstico
-  // adjuntando metadata de CloudConnectionCode para la UI
   const classified = classifyFirebaseError(error, 'persistence_error');
   if (rawCode.includes('permission-denied') || rawMsg.includes('Missing or insufficient permissions')) {
     const structuredError = new CloudOperationError(
@@ -305,7 +386,6 @@ export function formatCloudErrorForUser(error: unknown, fallback = 'Ocurrió un 
   message: string;
 } {
   if (error instanceof CloudOperationError) {
-    // Si el mensaje es JSON FirestoreErrorInfo, traducir a mensaje claro para el usuario final
     if (error.message.startsWith('{') && error.message.includes('"operationType"')) {
       return {
         code: error.code,

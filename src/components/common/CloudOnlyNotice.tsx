@@ -13,9 +13,10 @@ import { useAuth } from '../../context/AuthContext';
 
 interface CloudOnlyNoticeProps {
   variant?: 'banner' | 'card' | 'inline';
+  message?: string;
 }
 
-export const CloudOnlyNotice: React.FC<CloudOnlyNoticeProps> = ({ variant = 'banner' }) => {
+export const CloudOnlyNotice: React.FC<CloudOnlyNoticeProps> = ({ variant = 'banner', message }) => {
   const { connectionState, connectionError, retryConnection } = useAuth();
   const configured = isFirebaseConfigured();
 
@@ -30,9 +31,10 @@ export const CloudOnlyNotice: React.FC<CloudOnlyNoticeProps> = ({ variant = 'ban
         <AlertTriangle className="w-4 h-4 shrink-0" />
         <span>
           <strong>Arquitectura Cloud-Only:</strong>{' '}
-          {!configured
-            ? 'Conexión con Firebase no configurada.'
-            : connectionError || 'Firebase temporalmente inaccesible.'}
+          {message ||
+            (!configured
+              ? 'Conexión con Firebase no configurada.'
+              : connectionError || 'Firebase temporalmente inaccesible.')}
         </span>
       </div>
     );
@@ -54,9 +56,13 @@ export const CloudOnlyNotice: React.FC<CloudOnlyNoticeProps> = ({ variant = 'ban
         </div>
 
         <p className="text-xs text-amber-900/80 dark:text-amber-200/80 leading-relaxed">
-          Para garantizar la integridad y aislamiento multiempresa de los datos comerciales, esta aplicación
-          no utiliza almacenamiento local simulado (ni localStorage ni mockDataService). Para habilitar el registro,
-          inventario, catálogos y pedidos, configura <code className="font-mono">firebase-applet-config.json</code>.
+          {message || (
+            <>
+              Para garantizar la integridad y aislamiento multiempresa de los datos comerciales, esta aplicación
+              no utiliza almacenamiento local simulado (ni localStorage ni mockDataService). Para habilitar el registro,
+              inventario, catálogos y pedidos, configura <code className="font-mono">firebase-applet-config.json</code>.
+            </>
+          )}
         </p>
 
         <div className="p-3 bg-amber-100/60 dark:bg-amber-900/40 rounded-2xl font-mono text-[11px] text-amber-950 dark:text-amber-200 space-y-1">

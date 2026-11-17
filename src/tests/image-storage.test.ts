@@ -2,9 +2,9 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * PRUEBAS AUTOMATIZADAS: STORAGE DE IMÁGENES Y VALIDACIÓN DE SEGURIDAD (FIREBASE STORAGE)
+ * PRUEBAS AUTOMATIZADAS: STORAGE DE IMÁGENES, CLASIFICACIÓN DE ERRORES Y VALIDACIÓN RASTER [A]
  * Clasificación:
- * [A] Pruebas unitarias de validación raster, sanitización de rutas y política Cloud-Only.
+ * [A] Pruebas unitarias de validación raster, sanitización de rutas, eliminación segura y errores de Firebase Storage.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -12,9 +12,10 @@ import {
   validateImageFile,
   buildSafeStoragePath,
   uploadProductImageToStorage,
+  deleteProductImageFromStorage,
   MAX_IMAGE_FILE_SIZE,
 } from '../services/imageService';
-import { CloudOperationError } from '../services/firebaseClient';
+import { CloudOperationError, classifyFirebaseError } from '../services/firebaseClient';
 
 describe('[A] Validación de Archivos de Imagen y Seguridad Raster', () => {
   it('debe aceptar formatos rasterizados seguros (JPG, PNG, WebP) menores a 5 MB', () => {
@@ -83,7 +84,7 @@ describe('[A] Generación de Rutas Seguras de Firebase Storage y Aislamiento por
   });
 });
 
-describe('[A] Política Cloud-Only en Subida de Imágenes a Firebase Storage', () => {
+describe('[A] Política Cloud-Only y Clasificación de Errores de Firebase Storage', () => {
   it('debe rechazar la subida con CloudOperationError unauthorized si falta workspaceId (sin fallback local://)', async () => {
     const fakeBlob = new Blob(['contenido_de_imagen_falsa'], { type: 'image/png' });
 
@@ -107,5 +108,31 @@ describe('[A] Política Cloud-Only en Subida de Imágenes a Firebase Storage', (
         workspaceId: 'ws-demo',
       })
     ).rejects.toThrow(/SVG/);
+  });
+
+  it('debe rechazar deleteProductImageFromStorage para rutas fuera de catalog-images/', async () => {
+    await expect(deleteProductImageFromStorage('other-bucket/secret.png')).rejects.toMatchObject({
+      name: 'CloudOperationError',
+      code: 'unauthorized',
+    });
+  });
+
+  it('debe clasificar correctamente storage/bucket-not-found (HTTP 404), storage/quota-exceeded, storage/unauthorized y storage/retry-limit-exceeded', () => {
+    const bucket404 = classifyFirebaseError({
+      code: 'storage/bucket-not-found',
+      status_: 404,
+      message: 'Bucket does not exist',
+    });
+    expect(bucket404.code).toBe('not_configured');
+    expect(bucket404.userMessage).toMatch(/404|inicializado/i);
+
+    const quota = classifyFirebaseError({ code: 'storage/quota-exceeded', message: 'Quota' });
+    expect(quota.code).toBe('persistence_error');
+
+    const retryLimit = classifyFirebaseError({ code: 'storage/retry-limit-exceeded', message: 'Timeout' });
+    expect(retryLimit.code).toBe('unreachable');
+
+    const unauth = classifyFirebaseError({ code: 'storage/unauthenticated', message: 'Unauth' });
+    expect(unauth.code).toBe('session_expired');
   });
 });

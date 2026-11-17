@@ -28,6 +28,13 @@ service cloud.firestore {
       return isSignedIn() && request.auth.token.email_verified == true;
     }
 
+    function hasVerifiedEmailMatch(targetEmail) {
+      return isVerifiedUser() &&
+        request.auth.token.email != null &&
+        targetEmail is string &&
+        targetEmail.lower() == request.auth.token.email.lower();
+    }
+
     function isOwner(userId) {
       return isVerifiedUser() && request.auth.uid == userId;
     }
@@ -78,6 +85,21 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
 
+    function isValidUserMembership(data, userId, workspaceId) {
+      return data.keys().hasAll(['id', 'workspaceId', 'userId', 'workspaceName', 'role', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'workspaceId', 'userId', 'workspaceName', 'role', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.id == workspaceId &&
+        isValidId(data.workspaceId) &&
+        data.workspaceId == workspaceId &&
+        isValidId(data.userId) &&
+        data.userId == userId &&
+        data.workspaceName is string && data.workspaceName.size() >= 1 && data.workspaceName.size() <= 120 &&
+        data.role is string && data.role.size() <= 16 && data.role in ['owner', 'admin', 'member'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
     function isValidWorkspace(data, workspaceId) {
       return data.keys().hasAll(['id', 'ownerId', 'name', 'slug', 'whatsappNumber', 'currency', 'language', 'theme', 'createdAt', 'updatedAt']) &&
         data.keys().hasOnly(['id', 'ownerId', 'name', 'slug', 'tagline', 'logoUrl', 'whatsappNumber', 'contactEmail', 'currency', 'language', 'theme', 'settingsJson', 'createdAt', 'updatedAt']) &&
@@ -100,7 +122,7 @@ service cloud.firestore {
 
     function isValidWorkspaceMember(data, workspaceId, memberId) {
       return data.keys().hasAll(['id', 'workspaceId', 'userId', 'role', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['id', 'workspaceId', 'userId', 'role', 'email', 'fullName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'workspaceId', 'userId', 'role', 'email', 'fullName', 'invitationId', 'createdAt', 'updatedAt']) &&
         isValidId(data.id) &&
         data.id == memberId &&
         isValidId(data.workspaceId) &&
@@ -110,6 +132,25 @@ service cloud.firestore {
         data.role is string && data.role.size() <= 16 && data.role in ['owner', 'admin', 'member'] &&
         (!('email' in data) || data.email == null || (data.email is string && data.email.size() <= 254)) &&
         (!('fullName' in data) || data.fullName == null || (data.fullName is string && data.fullName.size() <= 120)) &&
+        (!('invitationId' in data) || data.invitationId == null || isValidId(data.invitationId)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidWorkspaceInvitation(data, workspaceId, invitationId) {
+      return data.keys().hasAll(['id', 'workspaceId', 'workspaceName', 'ownerId', 'email', 'role', 'status', 'invitedBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'workspaceId', 'workspaceName', 'ownerId', 'email', 'role', 'status', 'invitedBy', 'acceptedBy', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.id == invitationId &&
+        isValidId(data.workspaceId) &&
+        data.workspaceId == workspaceId &&
+        data.workspaceName is string && data.workspaceName.size() >= 1 && data.workspaceName.size() <= 120 &&
+        isValidId(data.ownerId) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        data.role is string && data.role.size() <= 16 && data.role in ['admin', 'member'] &&
+        data.status is string && data.status.size() <= 16 && data.status in ['pending', 'accepted', 'revoked'] &&
+        isValidId(data.invitedBy) &&
+        (!('acceptedBy' in data) || data.acceptedBy == null || isValidId(data.acceptedBy)) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -307,7 +348,7 @@ service cloud.firestore {
       allow list, write: if false;
     }
 
-    // 5. User Profiles (PII Isolated to Owner Only)
+    // 5. User Profiles & Personal Membership Discovery Index (PII Isolated to Owner Only)
     match /users/{userId} {
       allow get: if isOwner(userId);
       allow list: if false;
@@ -324,6 +365,67 @@ service cloud.firestore {
         incoming().updatedAt == request.time &&
         incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'avatarUrl', 'updatedAt']);
       allow delete: if false;
+
+      // 5.1 User Memberships Index (zero get() inside allow list; coupled atomically with workspace/members)
+      match /memberships/{workspaceId} {
+        allow get: if isValidId(workspaceId) && isOwner(userId);
+        allow list: if isOwner(userId);
+        allow create: if isValidId(userId) &&
+          isValidId(workspaceId) &&
+          isValidUserMembership(incoming(), userId, workspaceId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          (
+            (
+              isOwner(userId) &&
+              (
+                (incoming().role == 'owner' && getAfter(/databases/$(database)/documents/workspaces/$(workspaceId)).data.ownerId == userId) ||
+                (existsAfter(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(userId)) &&
+                 getAfter(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(userId)).data.role == incoming().role)
+              )
+            ) ||
+            (
+              isWorkspaceOwner(workspaceId) &&
+              existsAfter(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(userId)) &&
+              getAfter(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(userId)).data.role == incoming().role
+            ) ||
+            (
+              isWorkspaceAdmin(workspaceId) &&
+              incoming().role == 'member' &&
+              existsAfter(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(userId)) &&
+              getAfter(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(userId)).data.role == 'member'
+            )
+          );
+        allow update: if isValidId(userId) &&
+          isValidId(workspaceId) &&
+          isValidUserMembership(incoming(), userId, workspaceId) &&
+          incoming().id == existing().id &&
+          incoming().workspaceId == existing().workspaceId &&
+          incoming().userId == existing().userId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (
+            (isOwner(userId) && incoming().role == existing().role && incoming().diff(existing()).affectedKeys().hasOnly(['workspaceName', 'updatedAt'])) ||
+            (isWorkspaceOwner(workspaceId) && incoming().diff(existing()).affectedKeys().hasOnly(['workspaceName', 'role', 'updatedAt']) &&
+             existsAfter(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(userId)) &&
+             getAfter(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(userId)).data.role == incoming().role)
+          );
+        allow delete: if isValidId(userId) &&
+          isValidId(workspaceId) &&
+          (
+            isOwner(userId) ||
+            isWorkspaceOwner(workspaceId) ||
+            (isWorkspaceAdmin(workspaceId) && existing().role == 'member')
+          );
+      }
+    }
+
+    // 5.2 CollectionGroup query para que un usuario verificado descubra únicamente SUS invitaciones pendientes por email
+    match /{path=**}/invitations/{invitationId} {
+      allow list: if isVerifiedUser() &&
+        request.auth.token.email != null &&
+        resource.data.email == request.auth.token.email.lower() &&
+        resource.data.status == 'pending';
     }
 
     // 6. Workspaces (Multi-Tenant Root)
@@ -353,7 +455,7 @@ service cloud.firestore {
         ]);
       allow delete: if isWorkspaceOwner(workspaceId) && isValidId(workspaceId);
 
-      // 6.1 Workspace Members Subcollection
+      // 6.1 Workspace Members Subcollection (owner, admin, member + atomic invitation acceptance)
       match /members/{memberId} {
         allow get: if isValidId(memberId) && (isOwner(memberId) || isWorkspaceMember(workspaceId));
         allow list: if isWorkspaceMember(workspaceId);
@@ -365,7 +467,20 @@ service cloud.firestore {
           incoming().updatedAt == request.time &&
           (
             (isOwner(memberId) && incoming().role == 'owner' && getAfter(/databases/$(database)/documents/workspaces/$(workspaceId)).data.ownerId == request.auth.uid) ||
-            isWorkspaceOwner(workspaceId)
+            (
+              isOwner(memberId) &&
+              'invitationId' in incoming() &&
+              incoming().invitationId is string &&
+              isValidId(incoming().invitationId) &&
+              exists(/databases/$(database)/documents/workspaces/$(workspaceId)/invitations/$(incoming().invitationId)) &&
+              get(/databases/$(database)/documents/workspaces/$(workspaceId)/invitations/$(incoming().invitationId)).data.status == 'pending' &&
+              hasVerifiedEmailMatch(get(/databases/$(database)/documents/workspaces/$(workspaceId)/invitations/$(incoming().invitationId)).data.email) &&
+              get(/databases/$(database)/documents/workspaces/$(workspaceId)/invitations/$(incoming().invitationId)).data.role == incoming().role &&
+              getAfter(/databases/$(database)/documents/workspaces/$(workspaceId)/invitations/$(incoming().invitationId)).data.status == 'accepted' &&
+              getAfter(/databases/$(database)/documents/workspaces/$(workspaceId)/invitations/$(incoming().invitationId)).data.acceptedBy == request.auth.uid
+            ) ||
+            (isWorkspaceOwner(workspaceId) && incoming().role in ['admin', 'member']) ||
+            (isWorkspaceAdmin(workspaceId) && incoming().role == 'member')
           );
         allow update: if isWorkspaceOwner(workspaceId) &&
           isValidId(memberId) &&
@@ -375,8 +490,65 @@ service cloud.firestore {
           incoming().userId == existing().userId &&
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt == request.time &&
-          incoming().diff(existing()).affectedKeys().hasOnly(['role', 'email', 'fullName', 'updatedAt']);
-        allow delete: if isWorkspaceOwner(workspaceId) && isValidId(memberId) && memberId != request.auth.uid;
+          incoming().diff(existing()).affectedKeys().hasOnly(['role', 'email', 'fullName', 'updatedAt']) &&
+          ((memberId == request.auth.uid && incoming().role == 'owner') || (memberId != request.auth.uid && incoming().role in ['admin', 'member']));
+        allow delete: if isValidId(memberId) && (
+          (isWorkspaceOwner(workspaceId) && memberId != request.auth.uid) ||
+          (isWorkspaceAdmin(workspaceId) && existing().role == 'member' && memberId != request.auth.uid) ||
+          (isOwner(memberId) && existing().role != 'owner')
+        );
+      }
+
+      // 6.1.1 Workspace Invitations Subcollection
+      match /invitations/{invitationId} {
+        allow get: if isValidId(invitationId) && (
+          isWorkspaceAdmin(workspaceId) ||
+          (resource != null && hasVerifiedEmailMatch(existing().email))
+        );
+        allow list: if isWorkspaceAdmin(workspaceId);
+        allow create: if isValidId(workspaceId) &&
+          isValidId(invitationId) &&
+          isWorkspaceAdmin(workspaceId) &&
+          isValidWorkspaceInvitation(incoming(), workspaceId, invitationId) &&
+          incoming().status == 'pending' &&
+          incoming().invitedBy == request.auth.uid &&
+          incoming().ownerId == get(/databases/$(database)/documents/workspaces/$(workspaceId)).data.ownerId &&
+          (!('acceptedBy' in incoming()) || incoming().acceptedBy == null) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          (isWorkspaceOwner(workspaceId) || incoming().role == 'member');
+        allow update: if isValidId(workspaceId) &&
+          isValidId(invitationId) &&
+          isValidWorkspaceInvitation(incoming(), workspaceId, invitationId) &&
+          incoming().id == existing().id &&
+          incoming().workspaceId == existing().workspaceId &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().email == existing().email &&
+          incoming().role == existing().role &&
+          incoming().invitedBy == existing().invitedBy &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (
+            (
+              existing().status == 'pending' &&
+              incoming().status == 'accepted' &&
+              hasVerifiedEmailMatch(existing().email) &&
+              incoming().acceptedBy == request.auth.uid &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'acceptedBy', 'updatedAt']) &&
+              existsAfter(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(request.auth.uid)) &&
+              getAfter(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(request.auth.uid)).data.role == existing().role
+            ) ||
+            (
+              isWorkspaceAdmin(workspaceId) &&
+              (isWorkspaceOwner(workspaceId) || existing().role == 'member') &&
+              existing().status == 'pending' &&
+              incoming().status == 'revoked' &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+            )
+          );
+        allow delete: if isWorkspaceAdmin(workspaceId) &&
+          isValidId(invitationId) &&
+          (isWorkspaceOwner(workspaceId) || existing().role == 'member');
       }
 
       // 6.2 Categories Subcollection
@@ -398,7 +570,7 @@ service cloud.firestore {
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt == request.time &&
           incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'updatedAt']);
-        allow delete: if isWorkspaceMember(workspaceId) && isValidId(categoryId);
+        allow delete: if isWorkspaceAdmin(workspaceId) && isValidId(categoryId);
       }
 
       // 6.3 Products Subcollection
@@ -440,13 +612,14 @@ service cloud.firestore {
         allow update, delete: if false;
       }
 
-      // 6.5 Catalogs Subcollection
+      // 6.5 Catalogs Subcollection (member puede editar borradores; solo owner/admin publican, despublican o eliminan)
       match /catalogs/{catalogId} {
         allow get: if isValidId(catalogId) && isWorkspaceMember(workspaceId);
         allow list: if isWorkspaceMember(workspaceId);
         allow create: if isWorkspaceMember(workspaceId) &&
           isValidId(catalogId) &&
           isValidCatalog(incoming(), workspaceId, catalogId) &&
+          incoming().status == 'draft' &&
           incoming().ownerId == get(/databases/$(database)/documents/workspaces/$(workspaceId)).data.ownerId &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time;
@@ -464,15 +637,23 @@ service cloud.firestore {
               'templateId', 'visualSettings', 'products', 'itemsCount', 'coverImage',
               'logoUrl', 'updatedAt'
             ]) ||
-            (incoming().status == 'published' && incoming().diff(existing()).affectedKeys().hasOnly([
-              'internalName', 'title', 'subtitle', 'slug', 'shareToken', 'description',
-              'templateId', 'visualSettings', 'products', 'itemsCount', 'coverImage',
-              'logoUrl', 'status', 'version', 'publishedAt', 'publishedUrl',
-              'publishedSnapshot', 'updatedAt'
-            ])) ||
-            (incoming().status == 'draft' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'publishedAt', 'publishedUrl', 'updatedAt']))
+            (
+              isWorkspaceAdmin(workspaceId) &&
+              incoming().status == 'published' &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'internalName', 'title', 'subtitle', 'slug', 'shareToken', 'description',
+                'templateId', 'visualSettings', 'products', 'itemsCount', 'coverImage',
+                'logoUrl', 'status', 'version', 'publishedAt', 'publishedUrl',
+                'publishedSnapshot', 'updatedAt'
+              ])
+            ) ||
+            (
+              isWorkspaceAdmin(workspaceId) &&
+              incoming().status == 'draft' &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'publishedAt', 'publishedUrl', 'updatedAt'])
+            )
           );
-        allow delete: if isWorkspaceMember(workspaceId) && isValidId(catalogId);
+        allow delete: if isWorkspaceAdmin(workspaceId) && isValidId(catalogId);
       }
 
       // 6.6 Orders Subcollection (Strict PII Isolation + Validated Public Order Submission)
@@ -509,7 +690,7 @@ service cloud.firestore {
           incoming().updatedAt == request.time &&
           existing().status != 'cancelled' &&
           incoming().diff(existing()).affectedKeys().hasOnly(['status', 'notes', 'updatedAt']);
-        allow delete: if isWorkspaceMember(workspaceId) && isValidId(orderId);
+        allow delete: if isWorkspaceAdmin(workspaceId) && isValidId(orderId);
       }
     }
 
@@ -521,11 +702,11 @@ service cloud.firestore {
         isValidId(shareToken) &&
         isValidPublishedCatalog(incoming(), shareToken) &&
         incoming().updatedAt == request.time &&
-        isWorkspaceMember(incoming().workspaceId) &&
+        isWorkspaceAdmin(incoming().workspaceId) &&
         incoming().ownerId == get(/databases/$(database)/documents/workspaces/$(incoming().workspaceId)).data.ownerId;
       allow delete: if isVerifiedUser() &&
         isValidId(shareToken) &&
-        isWorkspaceMember(existing().workspaceId);
+        isWorkspaceAdmin(existing().workspaceId);
     }
   }
 }

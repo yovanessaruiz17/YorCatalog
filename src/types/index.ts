@@ -418,6 +418,35 @@ export interface WorkspaceMember {
   workspaceId: string;
   userId: string;
   role: WorkspaceRole;
+  email?: string;
+  fullName?: string;
+  invitationId?: string;
+  createdAt?: string;
   profile?: Profile;
 }
 
+export type WorkspaceInvitationStatus = 'pending' | 'accepted' | 'revoked';
+
+export interface WorkspaceInvitation {
+  id: string;
+  workspaceId: string;
+  workspaceName: string;
+  ownerId: string;
+  email: string;
+  role: Exclude<WorkspaceRole, 'owner'>;
+  status: WorkspaceInvitationStatus;
+  invitedBy: string;
+  acceptedBy?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UserMembership {
+  id: string;
+  workspaceId: string;
+  userId: string;
+  workspaceName: string;
+  role: WorkspaceRole;
+  createdAt: string;
+  updatedAt: string;
+}

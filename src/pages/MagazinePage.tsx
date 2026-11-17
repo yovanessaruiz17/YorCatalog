@@ -32,6 +32,7 @@ import { useSettings } from '../context/SettingsContext';
 import { dataService } from '../services/dataService';
 import { formatCloudErrorForUser } from '../services/firebaseClient';
 import { QueryStateAlert, QueryErrorState } from '../components/common/QueryStateAlert';
+import { ProtectedStorageImage } from '../components/common/ProtectedStorageImage';
 import { useAuth } from '../context/AuthContext';
 import { downloadCatalogPdfFile } from '../services/pdfGenerator';
 import QRCode from 'qrcode';
@@ -255,7 +256,7 @@ export const MagazinePage: React.FC = () => {
                     <div className="flex items-center gap-3">
                       <div className="w-12 h-12 rounded-2xl bg-slate-100 dark:bg-slate-800 overflow-hidden shrink-0">
                         {cat.coverImage ? (
-                          <img
+                          <ProtectedStorageImage
                             src={cat.coverImage}
                             alt={cat.title}
                             className="w-full h-full object-cover"
@@ -388,7 +389,7 @@ export const MagazinePage: React.FC = () => {
                   {/* Izquierda: Fotografía del producto */}
                   <div className="w-full md:w-1/2 relative min-h-[240px] md:min-h-full bg-slate-900 flex items-center justify-center">
                     {currentProduct.imageUrl ? (
-                      <img
+                      <ProtectedStorageImage
                         src={currentProduct.imageUrl}
                         alt={currentProduct.name}
                         className="w-full h-full object-cover"

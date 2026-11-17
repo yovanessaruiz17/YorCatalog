@@ -1,0 +1,59 @@
+rules_version = '2';
+
+// Firebase Storage Security Rules — YorCatalog (Fase R2.3.3 — Defensa en Profundidad con Storage Broker)
+//
+// MODELO AUTORITATIVO (BROKER-FIRST):
+// 1. Todas las mutaciones (subidas vía Signed URL V4, promoción al publicar, limpieza al
+//    despublicar y eliminación de activos) pasan obligatoriamente por el Storage Broker Backend
+//    (Firebase Admin SDK sobre Cloud Run), que valida:
+//    - `verifyIdToken(token, true)` (revocación inmediata, sin depender de Custom Claims ni signOut)
+//    - `email_verified == true`
+//    - Membresía y rol en vivo en la base Firestore nombrada `ai-studio-yorcatalog-2bed9ea5-0c3f-4ed5-ba39-992a8dc979d8`
+//    - Tamaño <= 5 MB, MIME y *magic bytes* reales (solo JPEG, PNG, WebP; anti-SVG)
+// 2. El Admin SDK opera con credenciales de servicio IAM y omite Storage Rules del lado cliente.
+// 3. Por defensa en profundidad, las operaciones directas desde SDK/REST de clientes quedan
+//    BLOQUEADAS (`if false`) para impedir cualquier escritura directa, enumeración o lectura privada
+//    que eluda al Broker.
+// 4. Únicamente se permite `allow get` individual en `/public-catalogs/{workspaceId}/{catalogId}/{fileName}`
+//    (sin `list` ni escrituras cliente) para que los compradores anónimos en `/m/:shareToken`
+//    visualicen imágenes raster publicadas sin necesidad de Download Tokens permanentes.
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    // 1. Bloqueo por defecto (Default Deny)
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    function isValidSegment(segment) {
+      return segment.matches('^[a-zA-Z0-9_\\-]{1,128}$');
+    }
+
+    function isSafeImageFileName(fileName) {
+      return fileName.matches('^[a-zA-Z0-9_\\-]{1,128}\\.(jpg|jpeg|png|webp)$') &&
+        !fileName.matches('(?i).*\\.svg$');
+    }
+
+    // 2. Activos PRIVADOS de inventario y staging: acceso directo cliente bloqueado (solo Broker V4 Signed URL)
+    match /catalog-images/{workspaceId}/{fileName} {
+      allow get, list: if false;
+      allow create, update, delete: if false;
+    }
+
+    // 3. Activos PRIVADOS internos del workspace: acceso directo cliente bloqueado (solo Broker V4 Signed URL)
+    match /workspace-private/{workspaceId}/{fileName} {
+      allow get, list: if false;
+      allow create, update, delete: if false;
+    }
+
+    // 4. Activos PÚBLICOS exclusivamente de catálogos publicados (/m/:shareToken):
+    //    Lectura individual anónima de imágenes raster válidas; listado y escritura cliente prohibidos.
+    match /public-catalogs/{workspaceId}/{catalogId}/{fileName} {
+      allow get: if isValidSegment(workspaceId) &&
+        isValidSegment(catalogId) &&
+        isSafeImageFileName(fileName);
+      allow list: if false;
+      allow create, update, delete: if false;
+    }
+  }
+}

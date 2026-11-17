@@ -17,25 +17,73 @@ import {
   QrCode,
   Sparkles,
   AlertCircle,
+  Users,
+  UserPlus,
+  Trash2,
+  XCircle,
+  Shield,
 } from 'lucide-react';
 import { useSettings } from '../context/SettingsContext';
 import { useAuth } from '../context/AuthContext';
-import { formatCloudErrorForUser } from '../services/firebaseClient';
-import { SupportedCurrency, SupportedLanguage, ThemeMode } from '../types';
+import { formatCloudErrorForUser, getFirebaseEnvironmentInfo } from '../services/firebaseClient';
+import { firebaseDataService } from '../services/firebaseDataService';
+import { SupportedCurrency, SupportedLanguage, ThemeMode, WorkspaceInvitation, WorkspaceMember } from '../types';
 
 export const SettingsPage: React.FC = () => {
   const { settings, updateSettings, t } = useSettings();
-  const { currentWorkspace, isLiveFirebase, connectionState } = useAuth();
+  const {
+    user,
+    currentWorkspace,
+    role,
+    isLiveFirebase,
+    connectionState,
+    pendingInvitations,
+    acceptInvitation,
+  } = useAuth();
   const [formData, setFormData] = useState(settings);
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // Team & Collaborators state
+  const [members, setMembers] = useState<WorkspaceMember[]>([]);
+  const [invitations, setInvitations] = useState<WorkspaceInvitation[]>([]);
+  const [loadingTeam, setLoadingTeam] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState<'admin' | 'member'>('member');
+  const [teamBusy, setTeamBusy] = useState(false);
+  const [teamMessage, setTeamMessage] = useState<string | null>(null);
+
+  const canManageSettings = role === 'owner' || role === 'admin';
+  const envInfo = getFirebaseEnvironmentInfo();
+
+  const loadTeamData = async (wsId: string) => {
+    setLoadingTeam(true);
+    try {
+      const [memberList, invList] = await Promise.all([
+        firebaseDataService.listWorkspaceMembers(wsId),
+        canManageSettings ? firebaseDataService.listWorkspaceInvitations(wsId) : Promise.resolve([]),
+      ]);
+      setMembers(memberList);
+      setInvitations(invList);
+    } catch {
+      // Silenciar si el rol actual no tiene permisos de listado de invitaciones
+    } finally {
+      setLoadingTeam(false);
+    }
+  };
+
   useEffect(() => {
     setFormData(settings);
     setActionError(null);
     setSavedSuccess(false);
-  }, [settings, currentWorkspace?.id]);
+    if (currentWorkspace?.id && isLiveFirebase) {
+      void loadTeamData(currentWorkspace.id);
+    } else {
+      setMembers([]);
+      setInvitations([]);
+    }
+  }, [settings, currentWorkspace?.id, role]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -73,6 +121,16 @@ export const SettingsPage: React.FC = () => {
           </div>
         )}
       </div>
+
+      {!canManageSettings && (
+        <div className="p-4 bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-900 rounded-2xl flex items-center gap-2.5 text-xs text-amber-800 dark:text-amber-200">
+          <Shield className="w-4 h-4 text-amber-600 shrink-0" />
+          <span>
+            Tu rol en este workspace es <strong className="font-mono">{role}</strong>. Solo los roles{' '}
+            <strong className="font-mono">owner</strong> y <strong className="font-mono">admin</strong> pueden modificar la configuración comercial o gestionar colaboradores.
+          </span>
+        </div>
+      )}
 
       {actionError && (
         <div className="p-4 bg-rose-50 dark:bg-rose-950/70 border border-rose-200 dark:border-rose-900 rounded-2xl flex items-center gap-2.5 text-xs text-rose-800 dark:text-rose-200">
@@ -383,11 +441,17 @@ export const SettingsPage: React.FC = () => {
 
             <div className="p-4 bg-slate-50 dark:bg-slate-800/50 rounded-2xl border border-slate-100 dark:border-slate-800 space-y-1.5 font-mono text-[11px]">
               <span className="font-bold font-sans text-slate-900 dark:text-white block mb-1">
-                Reglas y Estructura Versionada:
+                Entorno Activo y Reglas Versionadas:
               </span>
-              <div className="text-slate-600 dark:text-slate-300">✓ firebase-blueprint.json (Esquema multi-tenant por workspace)</div>
-              <div className="text-slate-600 dark:text-slate-300">✓ firestore.rules (Aislamiento por rol/workspace y tokens publicados)</div>
-              <div className="text-slate-600 dark:text-slate-300">✓ Firebase Storage (catalog-images/{'{workspaceId}'}/...)</div>
+              <div className="text-slate-600 dark:text-slate-300">
+                ✓ Entorno: {envInfo.environment} ({envInfo.source}) — Proyecto: {envInfo.projectId || 'sin configurar'}
+              </div>
+              {envInfo.usingSharedAppletFallback && (
+                <div className="text-amber-600 dark:text-amber-400">
+                  ⚠ Desarrollo usa firebase-applet-config.json; define VITE_FIREBASE_DEV_* para aislar proyectos.
+                </div>
+              )}
+              <div className="text-slate-600 dark:text-slate-300">✓ firestore.rules & storage.rules (Aislamiento multi-tenant)</div>
             </div>
           </div>
         </div>
@@ -396,7 +460,7 @@ export const SettingsPage: React.FC = () => {
         <div className="flex justify-end pt-2">
           <button
             type="submit"
-            disabled={saving}
+            disabled={saving || !canManageSettings}
             className="inline-flex items-center gap-2 px-6 py-2.5 text-xs sm:text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 dark:bg-emerald-600 dark:hover:bg-emerald-500 rounded-xl shadow-xs transition disabled:opacity-50"
           >
             <Save className="w-4 h-4" />
@@ -404,6 +468,211 @@ export const SettingsPage: React.FC = () => {
           </button>
         </div>
       </form>
+
+      {/* Section 7: Team & Collaborators Management */}
+      <div className="p-6 bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 rounded-3xl shadow-xs space-y-5">
+        <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800">
+          <div className="flex items-center gap-2.5">
+            <Users className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+            <h2 className="text-sm font-bold text-slate-900 dark:text-white uppercase tracking-wider">
+              Equipo y Colaboradores Multi-Tenant
+            </h2>
+          </div>
+          <span className="px-2.5 py-0.5 text-[10px] font-mono font-bold uppercase rounded-md bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+            Tu rol: {role}
+          </span>
+        </div>
+
+        {teamMessage && (
+          <div className="p-3 bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-900 rounded-2xl text-xs text-emerald-800 dark:text-emerald-200">
+            {teamMessage}
+          </div>
+        )}
+
+        {pendingInvitations.length > 0 && (
+          <div className="p-4 bg-emerald-50/70 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 rounded-2xl space-y-2.5">
+            <p className="text-xs font-bold text-emerald-900 dark:text-emerald-200">
+              Tienes invitaciones pendientes para unirte a otros workspaces:
+            </p>
+            {pendingInvitations.map((inv) => (
+              <div
+                key={inv.id}
+                className="flex items-center justify-between gap-3 p-3 bg-white dark:bg-slate-900 rounded-xl border border-emerald-100 dark:border-emerald-900"
+              >
+                <div className="text-xs">
+                  <span className="font-bold text-slate-900 dark:text-white block">
+                    {inv.workspaceName}
+                  </span>
+                  <span className="text-slate-500 font-mono">Rol asignado: {inv.role}</span>
+                </div>
+                <button
+                  type="button"
+                  disabled={teamBusy}
+                  onClick={async () => {
+                    setTeamBusy(true);
+                    setActionError(null);
+                    const res = await acceptInvitation(inv);
+                    if (res.error) setActionError(res.error);
+                    else setTeamMessage(`Te uniste a "${inv.workspaceName}" como ${inv.role}.`);
+                    setTeamBusy(false);
+                  }}
+                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg transition"
+                >
+                  Aceptar
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {canManageSettings && currentWorkspace && (
+          <div className="p-4 bg-slate-50 dark:bg-slate-800/50 rounded-2xl border border-slate-100 dark:border-slate-800 space-y-3">
+            <p className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
+              <UserPlus className="w-3.5 h-3.5 text-emerald-600" />
+              <span>Invitar colaborador al workspace</span>
+            </p>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <input
+                type="email"
+                value={inviteEmail}
+                onChange={(e) => setInviteEmail(e.target.value)}
+                placeholder="colaborador@empresa.com"
+                className="flex-1 px-3.5 py-2 text-xs bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white"
+              />
+              <select
+                value={role === 'owner' ? inviteRole : 'member'}
+                onChange={(e) => setInviteRole(e.target.value as 'admin' | 'member')}
+                disabled={role !== 'owner'}
+                className="px-3 py-2 text-xs bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white"
+              >
+                <option value="member">member (Operación)</option>
+                {role === 'owner' && <option value="admin">admin (Gestión)</option>}
+              </select>
+              <button
+                type="button"
+                disabled={teamBusy || !inviteEmail.trim()}
+                onClick={async () => {
+                  if (!currentWorkspace?.id) return;
+                  setTeamBusy(true);
+                  setActionError(null);
+                  setTeamMessage(null);
+                  try {
+                    await firebaseDataService.createWorkspaceInvitation({
+                      workspaceId: currentWorkspace.id,
+                      workspaceName: currentWorkspace.name,
+                      email: inviteEmail,
+                      role: role === 'owner' ? inviteRole : 'member',
+                    });
+                    setInviteEmail('');
+                    setTeamMessage('Invitación registrada en Firestore. El colaborador podrá aceptarla al iniciar sesión con su correo verificado.');
+                    await loadTeamData(currentWorkspace.id);
+                  } catch (err) {
+                    setActionError(formatCloudErrorForUser(err, 'No se pudo enviar la invitación.').message);
+                  } finally {
+                    setTeamBusy(false);
+                  }
+                }}
+                className="px-4 py-2 bg-slate-900 dark:bg-emerald-600 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-bold rounded-xl transition shrink-0"
+              >
+                Enviar Invitación
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="space-y-2">
+          <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+            Miembros activos ({members.length})
+          </p>
+          {loadingTeam ? (
+            <p className="text-xs text-slate-400">Cargando miembros desde Firestore...</p>
+          ) : (
+            <div className="divide-y divide-slate-100 dark:divide-slate-800 border border-slate-100 dark:border-slate-800 rounded-2xl">
+              {members.map((m) => (
+                <div key={m.id} className="p-3 flex items-center justify-between gap-3 text-xs">
+                  <div className="min-w-0">
+                    <p className="font-bold text-slate-900 dark:text-white truncate">
+                      {m.fullName || m.email || m.userId}
+                    </p>
+                    <p className="text-[11px] text-slate-500 font-mono truncate">
+                      {m.email || m.userId}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="px-2 py-0.5 text-[10px] font-mono font-bold uppercase rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                      {m.role}
+                    </span>
+                    {m.role !== 'owner' &&
+                      m.userId !== user?.uid &&
+                      (role === 'owner' || (role === 'admin' && m.role === 'member')) && (
+                        <button
+                          type="button"
+                          disabled={teamBusy}
+                          onClick={async () => {
+                            if (!currentWorkspace?.id) return;
+                            setTeamBusy(true);
+                            try {
+                              await firebaseDataService.removeWorkspaceMember(currentWorkspace.id, m.userId);
+                              await loadTeamData(currentWorkspace.id);
+                            } catch (err) {
+                              setActionError(formatCloudErrorForUser(err, 'No se pudo remover al miembro.').message);
+                            } finally {
+                              setTeamBusy(false);
+                            }
+                          }}
+                          className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg"
+                          title="Remover colaborador"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {canManageSettings && invitations.filter((i) => i.status === 'pending').length > 0 && (
+          <div className="space-y-2">
+            <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+              Invitaciones pendientes enviadas
+            </p>
+            <div className="divide-y divide-slate-100 dark:divide-slate-800 border border-slate-100 dark:border-slate-800 rounded-2xl">
+              {invitations
+                .filter((i) => i.status === 'pending')
+                .map((inv) => (
+                  <div key={inv.id} className="p-3 flex items-center justify-between gap-3 text-xs">
+                    <div className="min-w-0">
+                      <p className="font-semibold text-slate-900 dark:text-white truncate">{inv.email}</p>
+                      <p className="text-[11px] font-mono text-slate-500">Rol: {inv.role}</p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={teamBusy}
+                      onClick={async () => {
+                        if (!currentWorkspace?.id) return;
+                        setTeamBusy(true);
+                        try {
+                          await firebaseDataService.revokeWorkspaceInvitation(currentWorkspace.id, inv.id);
+                          await loadTeamData(currentWorkspace.id);
+                        } catch (err) {
+                          setActionError(formatCloudErrorForUser(err, 'No se pudo revocar la invitación.').message);
+                        } finally {
+                          setTeamBusy(false);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg"
+                    >
+                      <XCircle className="w-3.5 h-3.5" />
+                      <span>Revocar</span>
+                    </button>
+                  </div>
+                ))}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 };

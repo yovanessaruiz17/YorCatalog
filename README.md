@@ -12,7 +12,7 @@ El desarrollo se realiza estrictamente en 5 fases:
 - ✅ **Fase 2:** Inventario real (CRUD), importación CSV en 5 pasos con preservación de ceros en EAN y asociación masiva de imágenes (ZIP, nombres EAN, mapeo manual).
 - ✅ **Fase 3:** Diseñador de catálogos, 4 plantillas comerciales, snapshots inmutables y generador nativo de PDF vectorial con QR dinámico.
 - ✅ **Fase 4:** Revista virtual pública, catálogo interactivo con lectura autónoma, carrito de compras, pedidos estructurados por WhatsApp y auditoría comercial.
-- ⏳ **Fase 5:** Persistencia definitiva (PostgreSQL / Supabase), seguridad RLS, pruebas integrales y despliegue a producción.
+- ✅ **Fase 5 & R2.3.1:** Persistencia Cloud-Only en Firebase (Firestore, Firebase Auth y Firebase Storage), reglas de seguridad multiempresa y pruebas de arquitectura.
 
 ---
 
@@ -27,7 +27,7 @@ El desarrollo se realiza estrictamente en 5 fases:
 - **Códigos QR Vectoriales:** `qrcode` para codificación de enlaces públicos dinámicos hacia la revista virtual.
 - **Descompresión ZIP en cliente:** `jszip` con protección activa contra zip bombs y path traversal.
 - **Iconografía:** `lucide-react`.
-- **Arquitectura de Servicios:** Desacoplada mediante interfaces TypeScript (`IProductService`, `ICatalogService`, `IImportService`, `IOrderService`, `ISettingsService`), con adaptador de desarrollo en memoria y sincronización en localStorage.
+- **Arquitectura Cloud-Only:** Firebase Auth, Cloud Firestore (base de datos dedicada con `firestore.rules`) y Firebase Storage (`storage.rules`). Prohibida la persistencia comercial local (`localStorage`, `sessionStorage`, `IndexedDB`).
 
 ---
 
@@ -144,15 +144,9 @@ Para facilitar la evaluación inmediata sin requerir archivos externos del usuar
 
 ---
 
-## ⏳ Dependencias Externas Pendientes (Para Fase 5)
+## ☁️ Arquitectura Cloud-Only y Entornos Firebase
 
-- **Supabase Client:** Para persistencia PostgreSQL multiusuario en la nube con Row Level Security (RLS).
-- **Supabase Storage:** Para almacenamiento remoto de fotografías de alta resolución en buckets privados/públicos.
-- **Supabase Auth:** Para control de acceso y espacios de trabajo empresariales.
-
----
-
-## 🚀 Próxima Fase
-
-**Fase 4: Revista virtual pública, catálogo interactivo, carrito de compras y recepción de pedidos por WhatsApp.**  
-*(En espera de la instrucción específica del usuario).*
+- **Firebase Auth:** Autenticación por Google y correo/contraseña con verificación de correo obligatoria.
+- **Cloud Firestore:** Persistencia multi-tenant aislada por workspace (`/workspaces/{workspaceId}/...`), índice de membresías (`/users/{userId}/memberships/{workspaceId}`), invitaciones (`/workspaces/{workspaceId}/invitations/{invitationId}`) y snapshots públicos desacoplados (`/publishedCatalogs/{shareToken}`).
+- **Firebase Storage:** Almacenamiento binario autenticado bajo `catalog-images/{workspaceId}/...` con validación raster estricta (JPG, PNG, WebP) y rechazo de SVG.
+- **Separación de Entornos:** Consulta `.env.example` y `src/services/firebaseConfig.ts` para configurar proyectos independientes entre `development` (`VITE_FIREBASE_DEV_*`) y `production` (`VITE_FIREBASE_PROD_*`).

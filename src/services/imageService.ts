@@ -2,32 +2,40 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * SERVICIO DE PROCESAMIENTO, ALMACENAMIENTO Y ASOCIACIÓN DE IMÁGENES POR EAN
+ * SERVICIO DE PROCESAMIENTO, ALMACENAMIENTO Y ASOCIACIÓN DE IMÁGENES POR EAN (FASE R2.3.3)
  * Implementa:
  * 1. Nombres de archivo por EAN (directo y normalizado).
  * 2. Carga múltiple o archivo ZIP (con protección contra zip bombs y sanitización de rutas).
- * 3. Restricción estricta a formatos rasterizados seguros (JPG, PNG, WebP) eliminando el vector SVG XSS.
- * 4. Subida real a Firebase Storage (carpeta catalog-images/{workspaceId}/...) con aislamiento multi-tenant.
- * 5. Prevención de colisiones con nonces y timestamps seguros.
- * 6. Política Cloud-Only: rechaza con CloudOperationError si Firebase Storage no está configurado o falla.
+ * 3. Restricción estricta a formatos rasterizados seguros (JPG, PNG, WebP) eliminando SVG XSS.
+ * 4. Integración con Storage Broker Backend (`/api/storage/*`):
+ *    - `POST /api/storage/sign-upload` + subida PUT por Signed URL V4 (sin Download Tokens privados).
+ *    - `GET /api/storage/private-asset-url` con caché únicamente en memoria RAM y expiración automática.
+ *    - `POST /api/storage/publish-assets` y `POST /api/storage/unpublish-assets` para ciclo de vida público.
+ *    - `DELETE /api/storage/asset` para eliminación autorizada por owner/admin.
+ * 5. Política Cloud-Only: rechaza con CloudOperationError si Auth/Broker/Storage no están operativos.
  */
 
 import JSZip from 'jszip';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import {
+  auth,
+  firebaseConfig,
   isFirebaseConfigured,
-  storage,
   CloudOperationError,
-  classifyFirebaseError,
+  CloudConnectionCode,
 } from './firebaseClient';
 import { CandidateImage, Product } from '../types';
 
-// Formatos rasterizados seguros. SVG EXCLUIDO para evitar Stored XSS por scripts incrustados.
 export const ALLOWED_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp']);
 export const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 export const MAX_IMAGE_FILE_SIZE = 5 * 1024 * 1024; // 5 MB por imagen
 export const MAX_ZIP_FILES = 200;
 export const MAX_TOTAL_UNCOMPRESSED_BYTES = 50 * 1024 * 1024; // 50MB límite de seguridad total
+
+export const STORAGE_PREFIXES = {
+  privateCatalogStaging: 'catalog-images',
+  privateWorkspace: 'workspace-private',
+  publicPublished: 'public-catalogs',
+} as const;
 
 export interface ImageValidationResult {
   valid: boolean;
@@ -236,11 +244,258 @@ export function buildSafeStoragePath(
   return `${safeWorkspaceId}/${cleanBase}_${timestamp}_${randomNonce}.${safeExt}`;
 }
 
+export function buildPrivateAssetStoragePath(
+  workspaceId: string,
+  filename: string,
+  ean?: string | null
+): string {
+  return `${STORAGE_PREFIXES.privateCatalogStaging}/${buildSafeStoragePath(workspaceId, filename, ean)}`;
+}
+
+export function buildWorkspacePrivateAssetPath(
+  workspaceId: string,
+  filename: string
+): string {
+  return `${STORAGE_PREFIXES.privateWorkspace}/${buildSafeStoragePath(workspaceId, filename)}`;
+}
+
+export function buildPublicCatalogStoragePath(
+  workspaceId: string,
+  catalogId: string,
+  filename: string,
+  ean?: string | null
+): string {
+  const safeCatalogId = catalogId.replace(/[^a-zA-Z0-9_-]/g, '') || 'catalog';
+  const safeRelative = buildSafeStoragePath(workspaceId, filename, ean);
+  const [safeWorkspaceId, fileSegment] = safeRelative.split('/');
+  return `${STORAGE_PREFIXES.publicPublished}/${safeWorkspaceId}/${safeCatalogId}/${fileSegment}`;
+}
+
+export function isManagedStoragePath(storagePath: string): boolean {
+  if (!storagePath || storagePath.includes('..') || storagePath.includes('\\')) {
+    return false;
+  }
+  return (
+    storagePath.startsWith(`${STORAGE_PREFIXES.privateCatalogStaging}/`) ||
+    storagePath.startsWith(`${STORAGE_PREFIXES.privateWorkspace}/`) ||
+    storagePath.startsWith(`${STORAGE_PREFIXES.publicPublished}/`)
+  );
+}
+
+export function extractManagedStoragePath(urlOrPath: string | null | undefined): string | null {
+  if (!urlOrPath || typeof urlOrPath !== 'string') return null;
+  const trimmed = urlOrPath.trim();
+  if (!trimmed || trimmed.includes('..') || trimmed.includes('\\')) return null;
+
+  if (trimmed.startsWith('storage://')) {
+    const candidate = trimmed.slice('storage://'.length);
+    return isManagedStoragePath(candidate) ? candidate : null;
+  }
+
+  if (isManagedStoragePath(trimmed)) {
+    return trimmed;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.hostname === 'firebasestorage.googleapis.com') {
+      const marker = '/o/';
+      const idx = parsed.pathname.indexOf(marker);
+      if (idx !== -1) {
+        const encodedObj = parsed.pathname.slice(idx + marker.length);
+        const decoded = decodeURIComponent(encodedObj);
+        return isManagedStoragePath(decoded) ? decoded : null;
+      }
+    }
+  } catch {
+    // No es URL válida
+  }
+
+  return null;
+}
+
+export function isPrivateManagedAsset(urlOrPath: string | null | undefined): boolean {
+  const storagePath = extractManagedStoragePath(urlOrPath);
+  if (!storagePath) return false;
+  return (
+    storagePath.startsWith(`${STORAGE_PREFIXES.privateCatalogStaging}/`) ||
+    storagePath.startsWith(`${STORAGE_PREFIXES.privateWorkspace}/`)
+  );
+}
+
+export function isPublicCatalogAsset(urlOrPath: string | null | undefined): boolean {
+  const storagePath = extractManagedStoragePath(urlOrPath);
+  if (!storagePath) return false;
+  return storagePath.startsWith(`${STORAGE_PREFIXES.publicPublished}/`);
+}
+
+function getBrokerBaseUrl(): string {
+  const envBase =
+    typeof import.meta !== 'undefined'
+      ? (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_STORAGE_BROKER_BASE_URL
+      : undefined;
+  return (envBase || '').trim().replace(/\/+$/, '');
+}
+
+function buildBrokerUrl(endpointPath: string): string {
+  const base = getBrokerBaseUrl();
+  return `${base}${endpointPath}`;
+}
+
+function mapBrokerStatusToCloudCode(status: number, bodyCode?: string): CloudConnectionCode {
+  if (status === 401 || bodyCode === 'token_revoked' || bodyCode === 'token_expired') {
+    return 'session_expired';
+  }
+  if (status === 403) {
+    return 'unauthorized';
+  }
+  if (status === 503 || status === 404 || bodyCode === 'broker_not_configured' || bodyCode === 'storage_not_found') {
+    return 'not_configured';
+  }
+  return 'persistence_error';
+}
+
+async function requireVerifiedIdToken(): Promise<{ token: string; uid: string }> {
+  if (!isFirebaseConfigured()) {
+    throw new CloudOperationError(
+      'not_configured',
+      'Firebase no está configurado. YorCatalog opera exclusivamente en la nube (Cloud-Only).'
+    );
+  }
+  if (!auth?.currentUser) {
+    throw new CloudOperationError(
+      'session_expired',
+      'Debes iniciar sesión en Firebase Auth para operar con activos en Storage.'
+    );
+  }
+  if (!auth.currentUser.emailVerified) {
+    throw new CloudOperationError(
+      'unauthorized',
+      'Verifica tu correo electrónico en Firebase Auth antes de operar con Storage.'
+    );
+  }
+  const token = await auth.currentUser.getIdToken();
+  return { token, uid: auth.currentUser.uid };
+}
+
+async function readFileHeaderBase64(file: Blob, maxBytes = 64): Promise<string> {
+  const slice = file.slice(0, maxBytes);
+  const arrayBuf = await slice.arrayBuffer();
+  const bytes = new Uint8Array(arrayBuf);
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(bytes).toString('base64');
+  }
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+// Caché estrictamente en memoria RAM (cero localStorage / sessionStorage / IndexedDB)
+interface CachedSignedUrlEntry {
+  signedUrl: string;
+  expiresAtMs: number;
+}
+const privateSignedUrlCache = new Map<string, CachedSignedUrlEntry>();
+
+export function clearPrivateAssetUrlCache(): void {
+  privateSignedUrlCache.clear();
+}
+
+export function isCachedSignedUrlValid(entry: CachedSignedUrlEntry | undefined, nowMs = Date.now()): boolean {
+  if (!entry) return false;
+  // Renovar 15s antes del vencimiento real para evitar errores 403 por reloj/latencia
+  return entry.expiresAtMs - 15_000 > nowMs;
+}
+
+export async function resolvePrivateAssetUrl(
+  urlOrPath: string,
+  workspaceId?: string,
+  options?: { forceRefresh?: boolean; fetchImpl?: typeof fetch }
+): Promise<string> {
+  if (!urlOrPath) return urlOrPath;
+  if (!isPrivateManagedAsset(urlOrPath)) {
+    return urlOrPath;
+  }
+
+  const storagePath = extractManagedStoragePath(urlOrPath);
+  if (!storagePath) return urlOrPath;
+
+  const targetWorkspaceId = workspaceId || storagePath.split('/')[1] || '';
+  if (!targetWorkspaceId) {
+    throw new CloudOperationError(
+      'unauthorized',
+      'Se requiere workspaceId para resolver la URL firmada del activo privado.'
+    );
+  }
+
+  const cacheKey = `${targetWorkspaceId}:${storagePath}`;
+  if (!options?.forceRefresh) {
+    const cached = privateSignedUrlCache.get(cacheKey);
+    if (isCachedSignedUrlValid(cached)) {
+      return cached!.signedUrl;
+    }
+  }
+
+  const { token } = await requireVerifiedIdToken();
+  const fetchFn = options?.fetchImpl ?? fetch;
+  const query = new URLSearchParams({
+    workspaceId: targetWorkspaceId,
+    storagePath,
+  });
+
+  let response: Response;
+  try {
+    response = await fetchFn(buildBrokerUrl(`/api/storage/private-asset-url?${query.toString()}`), {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+  } catch (err) {
+    throw new CloudOperationError(
+      'unreachable',
+      'No se pudo contactar al Storage Broker para firmar la lectura del activo privado.',
+      { path: storagePath, originalError: err }
+    );
+  }
+
+  const data = (await response.json().catch(() => ({}))) as {
+    signedUrl?: string;
+    expiresAt?: string;
+    ttlSeconds?: number;
+    error?: string;
+    code?: string;
+  };
+
+  if (!response.ok || !data.signedUrl) {
+    throw new CloudOperationError(
+      mapBrokerStatusToCloudCode(response.status, data.code),
+      data.error || 'El Storage Broker rechazó la lectura del activo privado.',
+      { path: storagePath }
+    );
+  }
+
+  const expiresAtMs = data.expiresAt
+    ? Date.parse(data.expiresAt)
+    : Date.now() + (data.ttlSeconds || 300) * 1000;
+
+  privateSignedUrlCache.set(cacheKey, {
+    signedUrl: data.signedUrl,
+    expiresAtMs: Number.isFinite(expiresAtMs) ? expiresAtMs : Date.now() + 240_000,
+  });
+
+  return data.signedUrl;
+}
+
 export interface UploadImageToStorageOptions {
   file: File | Blob;
   filename: string;
   workspaceId: string;
   ean?: string | null;
+  scope?: 'catalog_staging' | 'workspace_private';
+  fetchImpl?: typeof fetch;
 }
 
 export interface StorageUploadOutcome {
@@ -248,16 +503,18 @@ export interface StorageUploadOutcome {
   storagePath: string;
   isLocal: boolean;
   sizeBytes: number;
+  isPrivate: boolean;
 }
 
 /**
- * Sube una imagen a Firebase Storage bajo `catalog-images/{workspaceId}/{archivo}`
- * con validación de seguridad raster y sin fallback local en base64.
+ * Sube una imagen a Firebase Storage exclusivamente a través del Storage Broker:
+ * 1. Solicita Signed URL V4 a `POST /api/storage/sign-upload` enviando encabezado para validar magic bytes.
+ * 2. Ejecuta PUT directo a GCS/Storage usando la Signed URL V4 de vida corta (sin Download Tokens permanentes).
  */
 export async function uploadProductImageToStorage(
   options: UploadImageToStorageOptions
 ): Promise<StorageUploadOutcome> {
-  const { file, filename, workspaceId, ean } = options;
+  const { file, filename, workspaceId, ean, scope = 'catalog_staging', fetchImpl } = options;
 
   const validation = validateImageFile({
     name: filename,
@@ -272,7 +529,7 @@ export async function uploadProductImageToStorage(
     );
   }
 
-  if (!isFirebaseConfigured() || !storage) {
+  if (!isFirebaseConfigured()) {
     throw new CloudOperationError(
       'not_configured',
       'Firebase Storage no está configurado. YorCatalog opera exclusivamente en la nube (Cloud-Only).'
@@ -286,37 +543,267 @@ export async function uploadProductImageToStorage(
     );
   }
 
-  const relativePath = buildSafeStoragePath(workspaceId, filename, ean);
-  const fullStoragePath = `catalog-images/${relativePath}`;
+  const { token } = await requireVerifiedIdToken();
+  const fetchFn = fetchImpl ?? fetch;
+  const fileHeaderBase64 = await readFileHeaderBase64(file, 64);
 
+  let signRes: Response;
   try {
-    const storageRef = ref(storage, fullStoragePath);
-    const snapshot = await uploadBytes(storageRef, file, {
-      contentType: file.type || 'image/jpeg',
-      cacheControl: 'public,max-age=3600',
+    signRes = await fetchFn(buildBrokerUrl('/api/storage/sign-upload'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        workspaceId,
+        scope,
+        filename,
+        contentType: file.type || 'image/jpeg',
+        sizeBytes: file.size,
+        ean: ean || undefined,
+        fileHeaderBase64,
+      }),
     });
-
-    const publicUrl = await getDownloadURL(snapshot.ref);
-    if (!publicUrl) {
-      throw new CloudOperationError(
-        'persistence_error',
-        'No fue posible resolver la URL pública en Firebase Storage.'
-      );
-    }
-
-    return {
-      publicUrl,
-      storagePath: fullStoragePath,
-      isLocal: false,
-      sizeBytes: file.size,
-    };
-  } catch (error) {
-    const classified = classifyFirebaseError(error, 'persistence_error');
-    throw new CloudOperationError(classified.code, classified.userMessage, {
-      path: fullStoragePath,
-      originalError: error,
-    });
+  } catch (err) {
+    throw new CloudOperationError(
+      'unreachable',
+      'No se pudo contactar al Storage Broker para firmar la subida de la imagen.',
+      { originalError: err }
+    );
   }
+
+  const signPayload = (await signRes.json().catch(() => ({}))) as {
+    uploadUrl?: string;
+    storagePath?: string;
+    canonicalMediaUrl?: string;
+    requiredHeaders?: Record<string, string>;
+    error?: string;
+    code?: string;
+  };
+
+  if (!signRes.ok || !signPayload.uploadUrl || !signPayload.storagePath) {
+    throw new CloudOperationError(
+      mapBrokerStatusToCloudCode(signRes.status, signPayload.code),
+      signPayload.error || 'El Storage Broker rechazó la solicitud de firma de subida.'
+    );
+  }
+
+  let putRes: Response;
+  try {
+    putRes = await fetchFn(signPayload.uploadUrl, {
+      method: 'PUT',
+      headers: signPayload.requiredHeaders || {
+        'Content-Type': file.type || 'image/jpeg',
+      },
+      body: file,
+    });
+  } catch (err) {
+    throw new CloudOperationError(
+      'unreachable',
+      'La transferencia binaria hacia Firebase Storage falló o se interrumpió.',
+      { path: signPayload.storagePath, originalError: err }
+    );
+  }
+
+  if (!putRes.ok) {
+    const code: CloudConnectionCode =
+      putRes.status === 403
+        ? 'unauthorized'
+        : putRes.status === 404
+          ? 'not_configured'
+          : 'persistence_error';
+    throw new CloudOperationError(
+      code,
+      `Firebase Storage rechazó la subida firmada (HTTP ${putRes.status}). Verifica si el bucket está inicializado y CORS configurado o si la URL firmada expiró.`,
+      { path: signPayload.storagePath }
+    );
+  }
+
+  const canonicalUrl =
+    signPayload.canonicalMediaUrl ||
+    `https://firebasestorage.googleapis.com/v0/b/${firebaseConfig.storageBucket}/o/${encodeURIComponent(signPayload.storagePath)}?alt=media`;
+
+  return {
+    publicUrl: canonicalUrl,
+    storagePath: signPayload.storagePath,
+    isLocal: false,
+    sizeBytes: file.size,
+    isPrivate: true,
+  };
+}
+
+export interface PromoteAssetInput {
+  itemKey: string;
+  sourceStoragePath: string;
+}
+
+export interface PromotedAssetOutput {
+  itemKey: string;
+  sourceStoragePath: string;
+  publicStoragePath: string;
+  publicUrl: string;
+}
+
+export async function promoteCatalogAssetsViaBroker(params: {
+  workspaceId: string;
+  catalogId: string;
+  assets: PromoteAssetInput[];
+  fetchImpl?: typeof fetch;
+}): Promise<PromotedAssetOutput[]> {
+  if (params.assets.length === 0) return [];
+
+  const { token } = await requireVerifiedIdToken();
+  const fetchFn = params.fetchImpl ?? fetch;
+
+  let res: Response;
+  try {
+    res = await fetchFn(buildBrokerUrl('/api/storage/publish-assets'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        workspaceId: params.workspaceId,
+        catalogId: params.catalogId,
+        assets: params.assets,
+      }),
+    });
+  } catch (err) {
+    throw new CloudOperationError(
+      'unreachable',
+      'No se pudo contactar al Storage Broker para promover las imágenes públicas del catálogo.',
+      { originalError: err }
+    );
+  }
+
+  const payload = (await res.json().catch(() => ({}))) as {
+    promoted?: PromotedAssetOutput[];
+    error?: string;
+    code?: string;
+  };
+
+  if (!res.ok || !Array.isArray(payload.promoted)) {
+    throw new CloudOperationError(
+      mapBrokerStatusToCloudCode(res.status, payload.code),
+      payload.error || 'Falló la promoción de imágenes públicas del catálogo en el Storage Broker.'
+    );
+  }
+
+  return payload.promoted;
+}
+
+export async function unpublishCatalogAssetsViaBroker(params: {
+  workspaceId: string;
+  catalogId: string;
+  fetchImpl?: typeof fetch;
+}): Promise<{ deletedCount: number; deletedPaths: string[] }> {
+  const { token } = await requireVerifiedIdToken();
+  const fetchFn = params.fetchImpl ?? fetch;
+
+  let res: Response;
+  try {
+    res = await fetchFn(buildBrokerUrl('/api/storage/unpublish-assets'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        workspaceId: params.workspaceId,
+        catalogId: params.catalogId,
+      }),
+    });
+  } catch (err) {
+    throw new CloudOperationError(
+      'unreachable',
+      'No se pudo contactar al Storage Broker para limpiar las imágenes públicas del catálogo.',
+      { originalError: err }
+    );
+  }
+
+  const payload = (await res.json().catch(() => ({}))) as {
+    deletedCount?: number;
+    deletedPaths?: string[];
+    error?: string;
+    code?: string;
+  };
+
+  if (!res.ok) {
+    throw new CloudOperationError(
+      mapBrokerStatusToCloudCode(res.status, payload.code),
+      payload.error || 'No se pudieron eliminar los activos públicos del catálogo.'
+    );
+  }
+
+  return {
+    deletedCount: Number(payload.deletedCount || 0),
+    deletedPaths: Array.isArray(payload.deletedPaths) ? payload.deletedPaths : [],
+  };
+}
+
+export async function deleteProductImageFromStorage(
+  storagePath: string,
+  workspaceId?: string,
+  fetchImpl?: typeof fetch
+): Promise<void> {
+  if (!isManagedStoragePath(storagePath)) {
+    throw new CloudOperationError(
+      'unauthorized',
+      'Ruta de archivo inválida para eliminación en Firebase Storage.'
+    );
+  }
+
+  if (!isFirebaseConfigured()) {
+    throw new CloudOperationError(
+      'not_configured',
+      'Firebase Storage no está configurado en este entorno.'
+    );
+  }
+
+  const resolvedWorkspaceId = workspaceId || storagePath.split('/')[1] || '';
+  if (!resolvedWorkspaceId) {
+    throw new CloudOperationError(
+      'unauthorized',
+      'Se requiere workspaceId para eliminar un archivo en Storage.'
+    );
+  }
+
+  const { token } = await requireVerifiedIdToken();
+  const fetchFn = fetchImpl ?? fetch;
+
+  let res: Response;
+  try {
+    res = await fetchFn(buildBrokerUrl('/api/storage/asset'), {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        workspaceId: resolvedWorkspaceId,
+        storagePath,
+      }),
+    });
+  } catch (err) {
+    throw new CloudOperationError(
+      'unreachable',
+      'No se pudo contactar al Storage Broker para eliminar el activo.',
+      { path: storagePath, originalError: err }
+    );
+  }
+
+  if (!res.ok) {
+    const payload = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+    throw new CloudOperationError(
+      mapBrokerStatusToCloudCode(res.status, payload.code),
+      payload.error || 'El Storage Broker denegó o falló al eliminar el archivo.',
+      { path: storagePath }
+    );
+  }
+
+  privateSignedUrlCache.delete(`${resolvedWorkspaceId}:${storagePath}`);
 }
 
 export async function fileToDataUrl(file: File): Promise<string> {

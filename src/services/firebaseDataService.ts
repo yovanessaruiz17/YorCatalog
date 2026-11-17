@@ -10,6 +10,7 @@
 
 import {
   collection,
+  collectionGroup,
   doc,
   getDoc,
   getDocFromServer,
@@ -34,7 +35,16 @@ import {
   handleFirestoreError,
   classifyFirebaseError,
 } from './firebaseClient';
-import { uploadProductImageToStorage } from './imageService';
+import {
+  uploadProductImageToStorage,
+  extractManagedStoragePath,
+  isPrivateManagedAsset,
+  isPublicCatalogAsset,
+  promoteCatalogAssetsViaBroker,
+  unpublishCatalogAssetsViaBroker,
+  type PromoteAssetInput,
+  type PromotedAssetOutput,
+} from './imageService';
 import {
   Product,
   Category,
@@ -49,6 +59,10 @@ import {
   SupportedCurrency,
   SupportedLanguage,
   ThemeMode,
+  UserMembership,
+  WorkspaceInvitation,
+  WorkspaceMember,
+  WorkspaceRole,
 } from '../types';
 
 const VALID_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
@@ -155,6 +169,110 @@ function mapCatalogDoc(id: string, data: Record<string, any>): Catalog {
     createdAt: timestampToIso(data.createdAt),
     updatedAt: timestampToIso(data.updatedAt),
   };
+}
+
+export function collectPrivateAssetsForCatalogPromotion(catalog: Pick<Catalog, 'coverImage' | 'logoUrl' | 'products'>): PromoteAssetInput[] {
+  const assets: PromoteAssetInput[] = [];
+
+  if (catalog.coverImage && isPrivateManagedAsset(catalog.coverImage)) {
+    const sourceStoragePath = extractManagedStoragePath(catalog.coverImage);
+    if (sourceStoragePath) {
+      assets.push({ itemKey: 'cover', sourceStoragePath });
+    }
+  }
+
+  if (catalog.logoUrl && isPrivateManagedAsset(catalog.logoUrl)) {
+    const sourceStoragePath = extractManagedStoragePath(catalog.logoUrl);
+    if (sourceStoragePath) {
+      assets.push({ itemKey: 'logo', sourceStoragePath });
+    }
+  }
+
+  const products = Array.isArray(catalog.products) ? catalog.products : [];
+  products.forEach((item, idx) => {
+    const snap = item?.snapshot;
+    if (!snap) return;
+
+    if (snap.imageUrl && isPrivateManagedAsset(snap.imageUrl)) {
+      const sourceStoragePath = extractManagedStoragePath(snap.imageUrl);
+      if (sourceStoragePath) {
+        assets.push({ itemKey: `product:${idx}`, sourceStoragePath });
+      }
+    }
+
+    if (Array.isArray(snap.additionalImages)) {
+      snap.additionalImages.forEach((extraUrl, extraIdx) => {
+        if (extraUrl && isPrivateManagedAsset(extraUrl)) {
+          const sourceStoragePath = extractManagedStoragePath(extraUrl);
+          if (sourceStoragePath) {
+            assets.push({ itemKey: `product:${idx}:extra:${extraIdx}`, sourceStoragePath });
+          }
+        }
+      });
+    }
+  });
+
+  return assets;
+}
+
+export function applyPromotedPublicUrlsToCatalogSnapshot(
+  catalog: Pick<Catalog, 'coverImage' | 'logoUrl' | 'products'>,
+  promoted: PromotedAssetOutput[]
+): {
+  coverImage: string | undefined;
+  logoUrl: string | undefined;
+  products: Catalog['products'];
+} {
+  const urlByKey = new Map<string, string>();
+  for (const entry of promoted) {
+    urlByKey.set(entry.itemKey, entry.publicUrl);
+  }
+
+  const coverImage = urlByKey.get('cover') ?? catalog.coverImage;
+  const logoUrl = urlByKey.get('logo') ?? catalog.logoUrl;
+  const products = (catalog.products || []).map((item, idx) => {
+    if (!item?.snapshot) return item;
+    const promotedPrimary = urlByKey.get(`product:${idx}`);
+    const promotedExtras = Array.isArray(item.snapshot.additionalImages)
+      ? item.snapshot.additionalImages.map(
+          (url, extraIdx) => urlByKey.get(`product:${idx}:extra:${extraIdx}`) ?? url
+        )
+      : item.snapshot.additionalImages;
+
+    if (!promotedPrimary && !promotedExtras) return item;
+    return {
+      ...item,
+      snapshot: {
+        ...item.snapshot,
+        ...(promotedPrimary ? { imageUrl: promotedPrimary } : {}),
+        ...(promotedExtras ? { additionalImages: promotedExtras } : {}),
+      },
+    };
+  });
+
+  return { coverImage, logoUrl, products };
+}
+
+export function hasPromotedPublicCatalogAssets(data: Record<string, any> | undefined): boolean {
+  if (!data) return false;
+  if (isPublicCatalogAsset(data.coverImage) || isPublicCatalogAsset(data.logoUrl)) {
+    return true;
+  }
+  const products = Array.isArray(data.products) ? data.products : [];
+  for (const item of products) {
+    if (isPublicCatalogAsset(item?.snapshot?.imageUrl)) return true;
+    const extras = Array.isArray(item?.snapshot?.additionalImages) ? item.snapshot.additionalImages : [];
+    if (extras.some((u: unknown) => typeof u === 'string' && isPublicCatalogAsset(u))) return true;
+  }
+  const snapProducts = Array.isArray(data.publishedSnapshot?.products)
+    ? data.publishedSnapshot.products
+    : [];
+  for (const item of snapProducts) {
+    if (isPublicCatalogAsset(item?.snapshot?.imageUrl)) return true;
+    const extras = Array.isArray(item?.snapshot?.additionalImages) ? item.snapshot.additionalImages : [];
+    if (extras.some((u: unknown) => typeof u === 'string' && isPublicCatalogAsset(u))) return true;
+  }
+  return false;
 }
 
 function mapOrderDoc(id: string, data: Record<string, any>): Order {
@@ -695,15 +813,29 @@ export class FirebaseDataService {
     try {
       const catRef = doc(firestore, 'workspaces', workspaceId, 'catalogs', id);
       const snap = await getDoc(catRef);
-      const shareToken = snap.exists() ? snap.data()?.shareToken : null;
+      const snapData = snap.exists() ? snap.data() : undefined;
+      const shareToken = snapData?.shareToken;
 
-      const batch = writeBatch(firestore);
-      batch.delete(catRef);
+      let pubData: Record<string, any> | undefined;
+      let pubExists = false;
       if (shareToken && VALID_ID_REGEX.test(shareToken)) {
         const pubSnap = await getDoc(doc(firestore, 'publishedCatalogs', shareToken));
         if (pubSnap.exists()) {
-          batch.delete(doc(firestore, 'publishedCatalogs', shareToken));
+          pubExists = true;
+          pubData = pubSnap.data();
         }
+      }
+
+      // Si existen activos públicos promovidos bajo public-catalogs/{wsId}/{id}/,
+      // eliminarlos sin tocar las imágenes maestras en catalog-images/{wsId}/.
+      if (hasPromotedPublicCatalogAssets(snapData) || hasPromotedPublicCatalogAssets(pubData)) {
+        await unpublishCatalogAssetsViaBroker({ workspaceId, catalogId: id });
+      }
+
+      const batch = writeBatch(firestore);
+      batch.delete(catRef);
+      if (pubExists && shareToken) {
+        batch.delete(doc(firestore, 'publishedCatalogs', shareToken));
       }
       await batch.commit();
       return true;
@@ -775,12 +907,38 @@ export class FirebaseDataService {
         ? window.location.origin
         : 'https://yorcatalog.app';
     const publicUrl = `${origin}/m/${token}`;
-    const products = (publishedData.products || []).slice(0, 300);
+    const draftProducts = (publishedData.products || []).slice(0, 300);
+
+    // 1. Promover vía Storage Broker EXCLUSIVAMENTE los activos de este snapshot hacia public-catalogs/{wsId}/{id}/
+    //    Si la promoción falla (total o parcialmente), abortar antes de marcar el catálogo como publicado.
+    const assetsToPromote = collectPrivateAssetsForCatalogPromotion({
+      coverImage: publishedData.coverImage,
+      logoUrl: publishedData.logoUrl,
+      products: draftProducts,
+    });
+
+    let promotedAssets: PromotedAssetOutput[] = [];
+    if (assetsToPromote.length > 0) {
+      promotedAssets = await promoteCatalogAssetsViaBroker({
+        workspaceId: wsId,
+        catalogId: id,
+        assets: assetsToPromote,
+      });
+    }
+
+    const publicView = applyPromotedPublicUrlsToCatalogSnapshot(
+      {
+        coverImage: publishedData.coverImage,
+        logoUrl: publishedData.logoUrl,
+        products: draftProducts,
+      },
+      promotedAssets
+    );
 
     const publishedSnapshot = {
       version: newVersion,
       publishedAt: nowIso,
-      products,
+      products: publicView.products,
       visualSettings: publishedData.visualSettings,
       templateId: publishedData.templateId,
       publicUrl,
@@ -791,7 +949,8 @@ export class FirebaseDataService {
 
     const batch = writeBatch(firestore);
 
-    // 1. Actualizar catálogo privado dentro del workspace (exactamente los keys permitidos en firestore.rules)
+    // 2. Actualizar catálogo privado en /workspaces/{wsId}/catalogs/{id} conservando fuentes privadas en `products`
+    //    y guardando el snapshot público promovido en `publishedSnapshot`.
     batch.update(catRef, {
       internalName: (publishedData.internalName || publishedData.title).trim().slice(0, 160),
       title: publishedData.title.trim().slice(0, 160),
@@ -801,8 +960,8 @@ export class FirebaseDataService {
       description: clampString(publishedData.description, 2000),
       templateId: publishedData.templateId,
       visualSettings: publishedData.visualSettings,
-      products,
-      itemsCount: products.length,
+      products: draftProducts,
+      itemsCount: draftProducts.length,
       coverImage: clampString(publishedData.coverImage, 1500),
       logoUrl: clampString(publishedData.logoUrl, 1500),
       status: 'published',
@@ -813,7 +972,7 @@ export class FirebaseDataService {
       updatedAt: serverTimestamp(),
     });
 
-    // 2. Publicar snapshot público desacoplado de lectura sin login en /publishedCatalogs/{shareToken}
+    // 3. Publicar snapshot público desacoplado con URLs públicas de `public-catalogs/` en /publishedCatalogs/{shareToken}
     batch.set(
       pubRef,
       stripUndefined({
@@ -832,12 +991,12 @@ export class FirebaseDataService {
         description: clampString(publishedData.description, 2000),
         status: 'published',
         version: newVersion,
-        itemsCount: products.length,
-        coverImage: clampString(publishedData.coverImage, 1500),
-        logoUrl: clampString(publishedData.logoUrl, 1500),
+        itemsCount: publicView.products.length,
+        coverImage: clampString(publicView.coverImage, 1500),
+        logoUrl: clampString(publicView.logoUrl, 1500),
         templateId: publishedData.templateId,
         visualSettings: publishedData.visualSettings,
-        products,
+        products: publicView.products,
         publishedAt: nowIso,
         publishedUrl: publicUrl,
         publishedSnapshot,
@@ -859,13 +1018,19 @@ export class FirebaseDataService {
         status: 'published',
         version: newVersion,
         shareToken: token,
-        itemsCount: products.length,
+        itemsCount: draftProducts.length,
         publishedAt: nowIso,
         publishedUrl: publicUrl,
         publishedSnapshot,
         updatedAt: nowIso,
       };
     } catch (error) {
+      // Compensación: si falló el commit de Firestore tras promover activos nuevos, limpiar copia pública si no estaba previamente publicada
+      if (promotedAssets.length > 0 && publishedData.status !== 'published') {
+        await unpublishCatalogAssetsViaBroker({ workspaceId: wsId, catalogId: id }).catch(
+          () => undefined
+        );
+      }
       handleFirestoreError(error, OperationType.WRITE, `workspaces/${wsId}/catalogs/${id}`);
     }
   }
@@ -881,7 +1046,25 @@ export class FirebaseDataService {
         throw new CloudOperationError('persistence_error', 'Catálogo no encontrado para despublicar.');
       }
 
-      const shareToken = snap.data()?.shareToken;
+      const snapData = snap.data();
+      const shareToken = snapData?.shareToken;
+      let pubExists = false;
+      let pubData: Record<string, any> | undefined;
+
+      if (shareToken && VALID_ID_REGEX.test(shareToken)) {
+        const pubRef = doc(firestore, 'publishedCatalogs', shareToken);
+        const pubSnap = await getDoc(pubRef);
+        if (pubSnap.exists()) {
+          pubExists = true;
+          pubData = pubSnap.data();
+        }
+      }
+
+      // Eliminar copias públicas bajo public-catalogs/{workspaceId}/{id}/ conservando maestras en catalog-images/
+      if (hasPromotedPublicCatalogAssets(snapData) || hasPromotedPublicCatalogAssets(pubData)) {
+        await unpublishCatalogAssetsViaBroker({ workspaceId, catalogId: id });
+      }
+
       const batch = writeBatch(firestore);
 
       batch.update(catRef, {
@@ -891,12 +1074,8 @@ export class FirebaseDataService {
         updatedAt: serverTimestamp(),
       });
 
-      if (shareToken && VALID_ID_REGEX.test(shareToken)) {
-        const pubRef = doc(firestore, 'publishedCatalogs', shareToken);
-        const pubSnap = await getDoc(pubRef);
-        if (pubSnap.exists()) {
-          batch.delete(pubRef);
-        }
+      if (pubExists && shareToken) {
+        batch.delete(doc(firestore, 'publishedCatalogs', shareToken));
       }
 
       await batch.commit();
@@ -1423,6 +1602,322 @@ export class FirebaseDataService {
       matched: exactMatches.length,
       updated: updatedCount,
     };
+  }
+
+  // --- COLABORADORES, MEMBRESÍAS E INVITACIONES MULTI-TENANT ---
+
+  async listUserMemberships(userId: string): Promise<UserMembership[]> {
+    const firestore = this.ensureDb();
+    const path = `users/${userId}/memberships`;
+    try {
+      const snap = await getDocs(collection(firestore, 'users', userId, 'memberships'));
+      return snap.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: data.id || d.id,
+          workspaceId: data.workspaceId || d.id,
+          userId: data.userId || userId,
+          workspaceName: data.workspaceName || 'Workspace Comercial',
+          role: (data.role as WorkspaceRole) || 'member',
+          createdAt: timestampToIso(data.createdAt),
+          updatedAt: timestampToIso(data.updatedAt),
+        };
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, path);
+    }
+  }
+
+  async listPendingInvitationsForEmail(email: string): Promise<WorkspaceInvitation[]> {
+    const firestore = this.ensureDb();
+    const normalizedEmail = (email || '').trim().toLowerCase();
+    if (!normalizedEmail) return [];
+
+    const path = `invitations(email=${normalizedEmail})`;
+    try {
+      const q = query(
+        collectionGroup(firestore, 'invitations'),
+        where('email', '==', normalizedEmail),
+        where('status', '==', 'pending')
+      );
+      const snap = await getDocs(q);
+      return snap.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: data.id || d.id,
+          workspaceId: data.workspaceId,
+          workspaceName: data.workspaceName || 'Workspace Comercial',
+          ownerId: data.ownerId,
+          email: data.email || normalizedEmail,
+          role: (data.role === 'admin' ? 'admin' : 'member') as 'admin' | 'member',
+          status: data.status || 'pending',
+          invitedBy: data.invitedBy || '',
+          acceptedBy: data.acceptedBy ?? undefined,
+          createdAt: timestampToIso(data.createdAt),
+          updatedAt: timestampToIso(data.updatedAt),
+        };
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, path);
+    }
+  }
+
+  async listWorkspaceMembers(workspaceId: string): Promise<WorkspaceMember[]> {
+    const firestore = this.ensureDb();
+    const path = `workspaces/${workspaceId}/members`;
+    try {
+      const snap = await getDocs(collection(firestore, 'workspaces', workspaceId, 'members'));
+      return snap.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: data.id || d.id,
+          workspaceId: data.workspaceId || workspaceId,
+          userId: data.userId || d.id,
+          role: (data.role as WorkspaceRole) || 'member',
+          email: data.email ?? undefined,
+          fullName: data.fullName ?? undefined,
+          invitationId: data.invitationId ?? undefined,
+          createdAt: timestampToIso(data.createdAt),
+        };
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, path);
+    }
+  }
+
+  async listWorkspaceInvitations(workspaceId: string): Promise<WorkspaceInvitation[]> {
+    const firestore = this.ensureDb();
+    const path = `workspaces/${workspaceId}/invitations`;
+    try {
+      const q = query(
+        collection(firestore, 'workspaces', workspaceId, 'invitations'),
+        orderBy('createdAt', 'desc')
+      );
+      const snap = await getDocs(q);
+      return snap.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: data.id || d.id,
+          workspaceId: data.workspaceId || workspaceId,
+          workspaceName: data.workspaceName || 'Workspace Comercial',
+          ownerId: data.ownerId || '',
+          email: data.email || '',
+          role: (data.role === 'admin' ? 'admin' : 'member') as 'admin' | 'member',
+          status: data.status || 'pending',
+          invitedBy: data.invitedBy || '',
+          acceptedBy: data.acceptedBy ?? undefined,
+          createdAt: timestampToIso(data.createdAt),
+          updatedAt: timestampToIso(data.updatedAt),
+        };
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, path);
+    }
+  }
+
+  async createWorkspaceInvitation(options: {
+    workspaceId: string;
+    workspaceName: string;
+    email: string;
+    role: 'admin' | 'member';
+  }): Promise<WorkspaceInvitation> {
+    const firestore = this.ensureDb();
+    const currentUid = auth?.currentUser?.uid;
+    if (!currentUid || !auth?.currentUser?.emailVerified) {
+      throw new CloudOperationError(
+        'unauthorized',
+        'Debes iniciar sesión con correo verificado para invitar colaboradores.'
+      );
+    }
+
+    const cleanEmail = options.email.trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@') || cleanEmail.length > 254) {
+      throw new CloudOperationError(
+        'persistence_error',
+        'Ingresa un correo electrónico válido para enviar la invitación.'
+      );
+    }
+
+    const ownerId = await this.resolveWorkspaceOwnerId(options.workspaceId);
+    const invitationId = generateId('inv');
+    const path = `workspaces/${options.workspaceId}/invitations/${invitationId}`;
+    const wsName = (options.workspaceName || 'Mi Negocio Comercial').trim().slice(0, 120);
+    const nowIso = new Date().toISOString();
+
+    const payload = {
+      id: invitationId,
+      workspaceId: options.workspaceId,
+      workspaceName: wsName,
+      ownerId,
+      email: cleanEmail,
+      role: options.role,
+      status: 'pending' as const,
+      invitedBy: currentUid,
+      acceptedBy: null,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
+
+    try {
+      await setDoc(
+        doc(firestore, 'workspaces', options.workspaceId, 'invitations', invitationId),
+        payload
+      );
+      return {
+        id: invitationId,
+        workspaceId: options.workspaceId,
+        workspaceName: wsName,
+        ownerId,
+        email: cleanEmail,
+        role: options.role,
+        status: 'pending',
+        invitedBy: currentUid,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, path);
+    }
+  }
+
+  async acceptWorkspaceInvitation(
+    invitation: WorkspaceInvitation,
+    fullName?: string
+  ): Promise<void> {
+    const firestore = this.ensureDb();
+    const user = auth?.currentUser;
+    if (!user || !user.emailVerified || !user.email) {
+      throw new CloudOperationError(
+        'unauthorized',
+        'Se requiere una sesión con correo verificado para aceptar la invitación.'
+      );
+    }
+
+    const uid = user.uid;
+    const normalizedUserEmail = user.email.trim().toLowerCase();
+    if (normalizedUserEmail !== invitation.email.trim().toLowerCase()) {
+      throw new CloudOperationError(
+        'unauthorized',
+        `Esta invitación fue emitida para ${invitation.email} y no coincide con tu sesión actual.`
+      );
+    }
+
+    const invRef = doc(firestore, 'workspaces', invitation.workspaceId, 'invitations', invitation.id);
+    const memberRef = doc(firestore, 'workspaces', invitation.workspaceId, 'members', uid);
+    const userMembershipRef = doc(firestore, 'users', uid, 'memberships', invitation.workspaceId);
+
+    const displayName = (
+      fullName ||
+      user.displayName ||
+      normalizedUserEmail.split('@')[0] ||
+      'Colaborador'
+    )
+      .trim()
+      .slice(0, 120);
+
+    const batch = writeBatch(firestore);
+    batch.update(invRef, {
+      status: 'accepted',
+      acceptedBy: uid,
+      updatedAt: serverTimestamp(),
+    });
+    batch.set(memberRef, {
+      id: uid,
+      workspaceId: invitation.workspaceId,
+      userId: uid,
+      role: invitation.role,
+      email: normalizedUserEmail,
+      fullName: displayName,
+      invitationId: invitation.id,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    batch.set(userMembershipRef, {
+      id: invitation.workspaceId,
+      workspaceId: invitation.workspaceId,
+      userId: uid,
+      workspaceName: (invitation.workspaceName || 'Workspace Comercial').trim().slice(0, 120),
+      role: invitation.role,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    try {
+      await batch.commit();
+    } catch (error) {
+      handleFirestoreError(
+        error,
+        OperationType.WRITE,
+        `workspaces/${invitation.workspaceId}/invitations/${invitation.id}`
+      );
+    }
+  }
+
+  async revokeWorkspaceInvitation(workspaceId: string, invitationId: string): Promise<void> {
+    const firestore = this.ensureDb();
+    const path = `workspaces/${workspaceId}/invitations/${invitationId}`;
+    try {
+      await updateDoc(doc(firestore, 'workspaces', workspaceId, 'invitations', invitationId), {
+        status: 'revoked',
+        updatedAt: serverTimestamp(),
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+  }
+
+  async updateWorkspaceMemberRole(
+    workspaceId: string,
+    memberId: string,
+    role: 'admin' | 'member',
+    workspaceName?: string
+  ): Promise<void> {
+    const firestore = this.ensureDb();
+    const path = `workspaces/${workspaceId}/members/${memberId}`;
+    const memberRef = doc(firestore, 'workspaces', workspaceId, 'members', memberId);
+    const userMembershipRef = doc(firestore, 'users', memberId, 'memberships', workspaceId);
+
+    try {
+      const membershipSnap = await getDoc(userMembershipRef);
+      const batch = writeBatch(firestore);
+      batch.update(memberRef, {
+        role,
+        updatedAt: serverTimestamp(),
+      });
+      if (membershipSnap.exists()) {
+        batch.update(userMembershipRef, {
+          role,
+          ...(workspaceName ? { workspaceName: workspaceName.trim().slice(0, 120) } : {}),
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        batch.set(userMembershipRef, {
+          id: workspaceId,
+          workspaceId,
+          userId: memberId,
+          workspaceName: (workspaceName || 'Workspace Comercial').trim().slice(0, 120),
+          role,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+      await batch.commit();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+  }
+
+  async removeWorkspaceMember(workspaceId: string, memberId: string): Promise<void> {
+    const firestore = this.ensureDb();
+    const path = `workspaces/${workspaceId}/members/${memberId}`;
+    try {
+      const batch = writeBatch(firestore);
+      batch.delete(doc(firestore, 'workspaces', workspaceId, 'members', memberId));
+      batch.delete(doc(firestore, 'users', memberId, 'memberships', workspaceId));
+      await batch.commit();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, path);
+    }
   }
 }
 

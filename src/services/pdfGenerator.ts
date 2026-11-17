@@ -17,10 +17,20 @@ import QRCode from 'qrcode';
 import { Catalog, CatalogProductItem } from '../types';
 import { formatCurrency } from '../utils/formatters';
 import { buildPublicCatalogUrl } from '../utils/url';
+import { isPrivateManagedAsset, resolvePrivateAssetUrl } from './imageService';
 
 export interface PDFGenerationProgress {
   percent: number;
   stage: string;
+}
+
+async function resolveImageUrlForPdf(url: string, workspaceId?: string): Promise<string> {
+  if (!url || !isPrivateManagedAsset(url)) return url;
+  try {
+    return await resolvePrivateAssetUrl(url, workspaceId);
+  } catch {
+    return url;
+  }
 }
 
 /**
@@ -124,7 +134,10 @@ export async function generateCatalogPDF(
   }
 
   // 2. Preload cover image
-  const coverDataUrl = catalog.coverImage ? await preloadImageAsDataUrl(catalog.coverImage) : null;
+  const resolvedCover = catalog.coverImage
+    ? await resolveImageUrlForPdf(catalog.coverImage, catalog.workspaceId)
+    : '';
+  const coverDataUrl = resolvedCover ? await preloadImageAsDataUrl(resolvedCover) : null;
 
   // 3. Preload product images in parallel
   const activeProducts = catalog.products || [];
@@ -135,7 +148,8 @@ export async function generateCatalogPDF(
     const item = activeProducts[i];
     const imgUrl = item.snapshot.imageUrl;
     if (imgUrl) {
-      const dataUrl = await preloadImageAsDataUrl(imgUrl);
+      const resolvedUrl = await resolveImageUrlForPdf(imgUrl, catalog.workspaceId);
+      const dataUrl = await preloadImageAsDataUrl(resolvedUrl);
       loadedProductImages.set(item.productId, dataUrl);
     }
     if (i % 3 === 0) {
